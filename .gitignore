@@ -1,0 +1,14 @@
+.build/
+.env
+logs/
+*.deb
+*.apk
+*.class
+apps/android/app/build/
+apps/android/local.properties
+services/api/api
+tools/jadx/
+tools/jadx.zip
+downloads/
+decompiled/
+apps/android/.gradle/

@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS topic_follows;
+DROP TABLE IF EXISTS topics;

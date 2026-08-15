@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS media_assets;
+DROP TABLE IF EXISTS reactions;
+DROP TABLE IF EXISTS comments;
+DROP TABLE IF EXISTS posts;

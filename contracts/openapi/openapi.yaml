@@ -1,0 +1,2712 @@
+openapi: 3.0.3
+info:
+  title: Lantern API
+  description: |
+    Canonical public API contract for the Lantern anonymous social client.
+
+    All public content is authored by an anonymous persona. Persona objects never
+    include email addresses, real-profile identifiers, or internal moderation notes.
+    Real-profile data is available only through `/v1/me` to an authenticated session.
+  version: "1.0.0"
+  contact:
+    name: Lantern Rebuild Team
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: "{scheme}://{host}:{port}"
+    description: Local development server (default)
+    variables:
+      scheme:
+        enum:
+          - http
+          - https
+        default: http
+      host:
+        default: localhost
+      port:
+        default: "8080"
+  - url: https://api-staging.lantern.app
+    description: Staging server
+  - url: https://api.lantern.app
+    description: Production server
+security:
+  - BearerAuth: []
+tags:
+  - name: Auth
+    description: Email-based authentication and session management.
+  - name: Identity
+    description: Real profile and anonymous persona management.
+  - name: Topics
+    description: Channels/topics, discovery, and follows.
+  - name: Posts
+    description: Notes/posts and feeds.
+  - name: Media
+    description: Media upload placeholder for future slices.
+  - name: Comments
+    description: Replies/comments on notes.
+  - name: Reactions
+    description: Likes and other reactions.
+  - name: Saves
+    description: Saved notes for the active persona.
+  - name: Reports
+    description: User-submitted reports.
+  - name: Blocks
+    description: Directional persona blocks.
+  - name: Moderation
+    description: Moderator-only case management.
+paths:
+  /v1/healthz:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      description: Returns a minimal status response. Does not require authentication.
+      security: []
+      tags:
+        - Health
+      responses:
+        "200":
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          description: Service is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /v1/auth/email-codes:
+    post:
+      operationId: sendEmailCode
+      summary: Request an email verification code
+      description: |
+        Sends a one-time verification code to the supplied email address. The code is
+        used to create or resume a session. Rate-limited per email address.
+      security: []
+      tags:
+        - Auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailCodeRequest"
+      responses:
+        "204":
+          description: Verification code sent.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/auth/email-sessions:
+    post:
+      operationId: createEmailSession
+      summary: Exchange a verification code for a session
+      description: |
+        Verifies the code and returns an access/refresh token pair. Creates a new real
+        profile if the email has never been used.
+      security: []
+      tags:
+        - Auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailSessionRequest"
+      responses:
+        "201":
+          description: Session created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/auth/refresh:
+    post:
+      operationId: refreshSession
+      summary: Refresh an access token
+      description: |
+        Exchanges a valid refresh token for a new access token. The old access token
+        may be rejected shortly after this call.
+      security: []
+      tags:
+        - Auth
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshTokenRequest"
+      responses:
+        "200":
+          description: New access token issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessTokenResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/auth/session:
+    delete:
+      operationId: deleteSession
+      summary: Revoke the current session
+      description: Revokes the access token used to authenticate the request.
+      tags:
+        - Auth
+      responses:
+        "204":
+          description: Session revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/me:
+    get:
+      operationId: getMe
+      summary: Get the authenticated real profile
+      description: |
+        Returns the authenticated real profile, including masked email and persona
+        management metadata. Public content is never returned here.
+      tags:
+        - Identity
+      responses:
+        "200":
+          description: Real profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RealProfile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    delete:
+      operationId: deleteMe
+      summary: Request account deletion
+      description: |
+        Starts the 30-day account deletion grace period. Requires a verification code
+        sent to the real profile email. Within the grace period, logging in cancels the
+        deletion.
+      tags:
+        - Identity
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountDeletionRequest"
+      responses:
+        "200":
+          description: Deletion initiated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountDeletionState"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /v1/me/email-change-requests:
+    post:
+      operationId: requestEmailChange
+      summary: Request an email change
+      description: |
+        Sends a verification code to the new email address. The change is confirmed
+        with `POST /v1/me/email-change-confirmations`.
+      tags:
+        - Identity
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailChangeRequest"
+      responses:
+        "204":
+          description: Verification code sent to new email.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/me/email-change-confirmations:
+    post:
+      operationId: confirmEmailChange
+      summary: Confirm an email change
+      description: Confirms the new email address using the verification code.
+      tags:
+        - Identity
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailChangeConfirmation"
+      responses:
+        "200":
+          description: Email changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RealProfile"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /v1/me/export-requests:
+    post:
+      operationId: requestDataExport
+      summary: Request a data export
+      description: |
+        Requests a machine-readable archive of the authenticated real profile's data.
+        Limited to one request per 30 days.
+      tags:
+        - Identity
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataExportRequest"
+      responses:
+        "202":
+          description: Export request accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DataExport"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/me/export-requests/{exportId}:
+    get:
+      operationId: getDataExport
+      summary: Get export request status
+      description: Returns the status and download URL of a data export request.
+      tags:
+        - Identity
+      parameters:
+        - name: exportId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Export request status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DataExport"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/me/personas:
+    get:
+      operationId: listMyPersonas
+      summary: List personas owned by the real profile
+      description: |
+        Returns all personas owned by the authenticated real profile, including their
+        private status and default flag. Public content is not included.
+      tags:
+        - Identity
+      responses:
+        "200":
+          description: Persona list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PrivatePersona"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createPersona
+      summary: Create a new persona
+      description: |
+        Creates an anonymous persona under the authenticated real profile. A real
+        profile may own up to `maxPersonas` active personas.
+      tags:
+        - Identity
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PersonaCreateRequest"
+      responses:
+        "201":
+          description: Persona created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrivatePersona"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/me/personas/{personaId}:
+    get:
+      operationId: getMyPersona
+      summary: Get a single owned persona
+      tags:
+        - Identity
+      parameters:
+        - name: personaId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Owned persona.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrivatePersona"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updatePersona
+      summary: Update an owned persona
+      description: |
+        Updates alias, bio, or avatar. Archived personas cannot be updated until
+        restored.
+      tags:
+        - Identity
+      parameters:
+        - name: personaId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PersonaUpdateRequest"
+      responses:
+        "200":
+          description: Persona updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrivatePersona"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+    delete:
+      operationId: archivePersona
+      summary: Archive an owned persona
+      description: |
+        Archives a persona. Archived personas no longer appear in public surfaces but
+        their historical content remains attributed to the persona.
+      tags:
+        - Identity
+      parameters:
+        - name: personaId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204":
+          description: Persona archived.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/me/personas/{personaId}/default:
+    put:
+      operationId: setDefaultPersona
+      summary: Set the default persona
+      description: |
+        Sets the persona used by default when entering public surfaces. The persona
+        must be active.
+      tags:
+        - Identity
+      parameters:
+        - name: personaId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Default persona set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrivatePersona"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/personas/{personaId}:
+    get:
+      operationId: getPersona
+      summary: Get a public persona profile
+      description: |
+        Returns public information about a persona. Blocked personas return a masked
+        profile with `isBlocked: true`.
+      tags:
+        - Identity
+      security: []
+      parameters:
+        - name: personaId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Public persona profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Persona"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/personas/{personaId}/posts:
+    get:
+      operationId: listPersonaPosts
+      summary: List notes authored by a persona
+      description: |
+        Returns published notes authored by the persona. Blocked content is omitted.
+      tags:
+        - Identity
+        - Posts
+      security: []
+      parameters:
+        - name: personaId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Paginated list of notes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPagePost"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/topics:
+    get:
+      operationId: listTopics
+      summary: Discover topics/channels
+      description: |
+        Returns curated topics. Supports search by `q`. Authenticated users see their
+        follow state.
+      tags:
+        - Topics
+      security: []
+      parameters:
+        - name: q
+          in: query
+          description: Search query for topic name or description.
+          schema:
+            type: string
+            maxLength: 100
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Paginated list of topics.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPageTopic"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/topics/{topicId}:
+    get:
+      operationId: getTopic
+      summary: Get a topic
+      tags:
+        - Topics
+      security: []
+      parameters:
+        - name: topicId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Topic details.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Topic"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/topics/{topicId}/posts:
+    get:
+      operationId: listTopicPosts
+      summary: List notes in a topic/channel
+      tags:
+        - Topics
+        - Posts
+      security: []
+      parameters:
+        - name: topicId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Paginated list of notes in the topic.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPagePost"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/topics/{topicId}/follow:
+    post:
+      operationId: followTopic
+      summary: Follow a topic
+      tags:
+        - Topics
+      parameters:
+        - name: topicId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204":
+          description: Topic followed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      operationId: unfollowTopic
+      summary: Unfollow a topic
+      tags:
+        - Topics
+      parameters:
+        - name: topicId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Topic unfollowed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/posts:
+    get:
+      operationId: listPosts
+      summary: Stream feed
+      description: |
+        Returns the main note feed. If `topicId` is provided, results are scoped to
+        that topic. Blocked content is omitted.
+      tags:
+        - Posts
+      security: []
+      parameters:
+        - name: topicId
+          in: query
+          description: Filter feed to a single topic.
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Paginated list of notes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPagePost"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createPost
+      summary: Create a note
+      description: |
+        Publishes a new note authored by the active persona. Requires an
+        `Idempotency-Key` header to allow safe retries.
+      tags:
+        - Posts
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PostCreateRequest"
+      responses:
+        "201":
+          description: Note created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Post"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/posts/{postId}:
+    get:
+      operationId: getPost
+      summary: Get a note
+      description: |
+        Returns a note. Blocked authors return a masked placeholder. The author sees
+        their own rejected/hidden notes with the full `moderationState`.
+      tags:
+        - Posts
+      security: []
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Note detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Post"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updatePost
+      summary: Edit a note
+      description: |
+        Edits a note authored by the active persona. Edits are allowed only on
+        published or pending-review notes.
+      tags:
+        - Posts
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PostUpdateRequest"
+      responses:
+        "200":
+          description: Note updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Post"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+    delete:
+      operationId: deletePost
+      summary: Delete a note
+      description: |
+        Soft-deletes a note. The note becomes unavailable publicly and appears as
+        deleted to the author.
+      tags:
+        - Posts
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204":
+          description: Note deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/posts/{postId}/comments:
+    get:
+      operationId: listComments
+      summary: List replies to a note
+      tags:
+        - Comments
+      security: []
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Paginated list of replies.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPageComment"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: createComment
+      summary: Reply to a note
+      description: |
+        Creates a reply authored by the active persona. Requires an
+        `Idempotency-Key` header.
+      tags:
+        - Comments
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommentCreateRequest"
+      responses:
+        "201":
+          description: Reply created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Comment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/posts/{postId}/comments/{commentId}:
+    get:
+      operationId: getComment
+      summary: Get a reply
+      tags:
+        - Comments
+      security: []
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: commentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Reply detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Comment"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateComment
+      summary: Edit a reply
+      tags:
+        - Comments
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: commentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommentUpdateRequest"
+      responses:
+        "200":
+          description: Reply updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Comment"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+    delete:
+      operationId: deleteComment
+      summary: Delete a reply
+      tags:
+        - Comments
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: commentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204":
+          description: Reply deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/posts/{postId}/reactions:
+    get:
+      operationId: listReactions
+      summary: List reactions on a note
+      description: Returns published reactions on a note.
+      security: []
+      tags:
+        - Reactions
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Paginated list of reactions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPageReaction"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: createReaction
+      summary: Add a reaction to a note
+      description: |
+        Adds or replaces the active persona's reaction on a note. The only supported
+        reaction type in the first slice is `like`.
+      tags:
+        - Reactions
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReactionCreateRequest"
+      responses:
+        "200":
+          description: Reaction recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReactionSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/posts/{postId}/reactions/{reactionType}:
+    delete:
+      operationId: deleteReaction
+      summary: Remove a reaction from a note
+      tags:
+        - Reactions
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: reactionType
+          in: path
+          required: true
+          schema:
+            type: string
+            enum:
+              - like
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204":
+          description: Reaction removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/posts/{postId}/saves:
+    post:
+      operationId: createSave
+      summary: Save a note
+      description: Saves the note for the active persona.
+      tags:
+        - Posts
+        - Saves
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204":
+          description: Note saved.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      operationId: deleteSave
+      summary: Unsave a note
+      description: Removes the save for the active persona.
+      tags:
+        - Posts
+        - Saves
+      parameters:
+        - name: postId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204":
+          description: Save removed.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/media-uploads:
+    post:
+      operationId: createMediaUploadIntent
+      summary: Create a media upload intent
+      description: |
+        Creates a pending media asset and returns a signed upload URL. The actual
+        upload is not implemented in the first slice; callers receive a placeholder
+        URL that will be wired to real storage later.
+      tags:
+        - Media
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MediaUploadIntentRequest"
+      responses:
+        "201":
+          description: Upload intent created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaUploadIntentResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/reports:
+    post:
+      operationId: createReport
+      summary: Submit a report
+      description: |
+        Submits a report against a note, reply, or persona. The report is associated
+        with the reporter's real profile for abuse prevention.
+      tags:
+        - Reports
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportCreateRequest"
+      responses:
+        "201":
+          description: Report submitted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/reports/{reportId}:
+    get:
+      operationId: getReport
+      summary: Get report status
+      description: |
+        Returns the status of a report submitted by the authenticated real profile.
+        Moderator actions are not exposed beyond `resolved`.
+      tags:
+        - Reports
+      parameters:
+        - name: reportId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Report status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Report"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/me/blocks:
+    get:
+      operationId: listBlocks
+      summary: List blocked personas
+      description: Returns the active persona's block list.
+      tags:
+        - Blocks
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Paginated block list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPageBlock"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createBlock
+      summary: Block a persona
+      description: |
+        Blocks a persona directionally. The active persona will no longer see the
+        target persona's content and the target cannot interact with the active
+        persona's content.
+      tags:
+        - Blocks
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BlockCreateRequest"
+      responses:
+        "201":
+          description: Block created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Block"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /v1/me/blocks/{blockId}:
+    delete:
+      operationId: deleteBlock
+      summary: Unblock a persona
+      tags:
+        - Blocks
+      parameters:
+        - name: blockId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204":
+          description: Block removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/me/appeals:
+    post:
+      operationId: createAppeal
+      summary: Submit an appeal
+      description: |
+        Submits an appeal against an account-level moderation action such as a warning
+        or suspension. Appeals are reviewed by a human moderator.
+      tags:
+        - Identity
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppealCreateRequest"
+      responses:
+        "201":
+          description: Appeal submitted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Appeal"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/moderation/cases:
+    get:
+      operationId: listModerationCases
+      summary: List moderation cases
+      description: |
+        Moderator-only endpoint. Lists open and recently resolved moderation cases.
+      tags:
+        - Moderation
+      parameters:
+        - name: status
+          in: query
+          description: Filter by case status.
+          schema:
+            type: string
+            enum:
+              - open
+              - underReview
+              - resolved
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Paginated list of moderation cases.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPageModerationCase"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: createModerationCase
+      summary: Create a moderation case
+      description: |
+        Moderator-only endpoint. Creates a case from one or more reports.
+      tags:
+        - Moderation
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModerationCaseCreateRequest"
+      responses:
+        "201":
+          description: Case created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModerationCase"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /v1/moderation/cases/{caseId}:
+    get:
+      operationId: getModerationCase
+      summary: Get a moderation case
+      description: Moderator-only endpoint.
+      tags:
+        - Moderation
+      parameters:
+        - name: caseId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Moderation case.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModerationCase"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateModerationCase
+      summary: Update a moderation case
+      description: |
+        Moderator-only endpoint. Resolves the case by applying an outcome to the
+        target content or account.
+      tags:
+        - Moderation
+      parameters:
+        - name: caseId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModerationCaseUpdateRequest"
+      responses:
+        "200":
+          description: Case updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModerationCase"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Bearer access token returned by `POST /v1/auth/email-sessions` or `POST /v1/auth/refresh`.
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor from a previous page's `pagination.nextCursor`.
+      schema:
+        type: string
+        maxLength: 1024
+    Limit:
+      name: limit
+      in: query
+      description: Maximum number of items to return. Default 20, maximum 100.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Client-generated unique key for safely retrying mutating requests. The server
+        stores the response for at least 24 hours and replays it for duplicate keys
+        targeting the same endpoint and authenticated principal.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+  schemas:
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          example: ok
+    ErrorCode:
+      type: string
+      description: Stable machine-readable error code.
+      enum:
+        - unauthorized
+        - forbidden
+        - not_found
+        - method_not_allowed
+        - conflict
+        - rate_limited
+        - internal_error
+        - not_implemented
+        - validation.failed
+        - idempotency.conflict
+        - idempotency.missing_key
+        - auth.invalid_email
+        - auth.invalid_code
+        - auth.rate_limited
+        - auth.session_expired
+        - auth.session_revoked
+        - auth.invalid_token
+        - me.not_found
+        - me.deletion_invalid_code
+        - me.deletion_already_pending
+        - me.email_change_invalid_code
+        - me.email_already_used
+        - me.email_change_rate_limited
+        - me.export_rate_limited
+        - me.export_not_ready
+        - me.export_not_found
+        - persona.not_found
+        - persona.not_owned
+        - persona.max_reached
+        - persona.alias_taken
+        - persona.alias_disallowed
+        - persona.archived
+        - persona.restricted
+        - persona.default_required
+        - validation.export_format_invalid
+        - topic.not_found
+        - topic.already_followed
+        - topic.not_followed
+        - topic.hidden
+        - post.not_found
+        - post.not_author
+        - post.invalid_state
+        - post.content_disallowed
+        - post.topic_required
+        - post.rate_limited
+        - comment.not_found
+        - comment.not_author
+        - comment.invalid_state
+        - comment.content_disallowed
+        - comment.parent_not_found
+        - comment.rate_limited
+        - reaction.invalid_type
+        - reaction.already_exists
+        - reaction.not_found
+        - reaction.target_not_found
+        - save.already_exists
+        - save.not_found
+        - media.invalid_format
+        - media.too_large
+        - block.not_found
+        - block.already_exists
+        - block.self
+        - report.invalid_target
+        - report.target_not_found
+        - report.duplicate
+        - report.details_required
+        - report.self
+        - moderation.case_not_found
+        - moderation.invalid_outcome
+        - moderation.invalid_status
+        - moderation.report_not_found
+        - moderation.not_moderator
+        - moderation.rate_limited
+    Error:
+      type: object
+      required:
+        - code
+        - message
+        - requestId
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
+          type: string
+          description: Human-readable description of the error.
+        requestId:
+          type: string
+          format: uuid
+          description: Request ID to include when contacting support.
+    User:
+      type: object
+      required:
+        - id
+        - emailMasked
+        - status
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        emailMasked:
+          type: string
+          description: Masked email address, e.g. `a•••@example.com`.
+          example: a•••@example.com
+        status:
+          type: string
+          enum:
+            - active
+            - deleting
+            - deleted
+            - suspended
+            - banned
+        createdAt:
+          type: string
+          format: date-time
+    RealProfile:
+      allOf:
+        - $ref: "#/components/schemas/User"
+        - type: object
+          required:
+            - updatedAt
+            - defaultPersonaId
+            - personaCount
+            - maxPersonas
+          properties:
+            updatedAt:
+              type: string
+              format: date-time
+            defaultPersonaId:
+              type: string
+              format: uuid
+              nullable: true
+            personaCount:
+              type: integer
+              minimum: 0
+            maxPersonas:
+              type: integer
+              minimum: 1
+              example: 5
+            deletion:
+              type: object
+              nullable: true
+              allOf:
+                - $ref: "#/components/schemas/AccountDeletionState"
+    Session:
+      type: object
+      required:
+        - accessToken
+        - refreshToken
+        - tokenType
+        - expiresIn
+        - personaId
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        tokenType:
+          type: string
+          enum:
+            - Bearer
+        expiresIn:
+          type: integer
+          description: Access token lifetime in seconds.
+        personaId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Default persona if one has been set.
+        isStaff:
+          type: boolean
+          description: True when the authenticated account has staff privileges.
+    AccessTokenResponse:
+      type: object
+      required:
+        - accessToken
+        - tokenType
+        - expiresIn
+      properties:
+        accessToken:
+          type: string
+        tokenType:
+          type: string
+          enum:
+            - Bearer
+        expiresIn:
+          type: integer
+        isStaff:
+          type: boolean
+          description: True when the authenticated account has staff privileges.
+    Avatar:
+      type: object
+      required:
+        - seed
+        - color
+      properties:
+        seed:
+          type: string
+          description: Deterministic seed used to render the generated avatar.
+        color:
+          type: string
+          pattern: "^#[0-9A-Fa-f]{6}$"
+          description: Hex color for the avatar background.
+    Persona:
+      type: object
+      required:
+        - id
+        - alias
+        - bio
+        - avatar
+        - createdAt
+        - noteCount
+      properties:
+        id:
+          type: string
+          format: uuid
+        alias:
+          type: string
+          minLength: 1
+          maxLength: 32
+        bio:
+          type: string
+          nullable: true
+          maxLength: 160
+        avatar:
+          $ref: "#/components/schemas/Avatar"
+        createdAt:
+          type: string
+          format: date-time
+        noteCount:
+          type: integer
+          minimum: 0
+        isBlocked:
+          type: boolean
+          description: True when the requesting persona has blocked or is blocked by this persona.
+    PrivatePersona:
+      type: object
+      required:
+        - id
+        - alias
+        - bio
+        - avatar
+        - createdAt
+        - updatedAt
+        - noteCount
+        - isDefault
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        alias:
+          type: string
+          minLength: 1
+          maxLength: 32
+        bio:
+          type: string
+          nullable: true
+          maxLength: 160
+        avatar:
+          $ref: "#/components/schemas/Avatar"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        noteCount:
+          type: integer
+          minimum: 0
+        isDefault:
+          type: boolean
+        status:
+          type: string
+          enum:
+            - active
+            - restricted
+            - archived
+    PersonaCreateRequest:
+      type: object
+      required:
+        - alias
+      properties:
+        alias:
+          type: string
+          minLength: 1
+          maxLength: 32
+        bio:
+          type: string
+          maxLength: 160
+        avatarSeed:
+          type: string
+          maxLength: 64
+        avatarColor:
+          type: string
+          pattern: "^#[0-9A-Fa-f]{6}$"
+    PersonaUpdateRequest:
+      type: object
+      properties:
+        alias:
+          type: string
+          minLength: 1
+          maxLength: 32
+        bio:
+          type: string
+          nullable: true
+          maxLength: 160
+        avatarSeed:
+          type: string
+          maxLength: 64
+        avatarColor:
+          type: string
+          pattern: "^#[0-9A-Fa-f]{6}$"
+    Topic:
+      type: object
+      required:
+        - id
+        - name
+        - description
+        - category
+        - noteCount
+        - followerCount
+        - isFollowed
+        - status
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 64
+        description:
+          type: string
+          maxLength: 256
+        category:
+          type: string
+          maxLength: 64
+        noteCount:
+          type: integer
+          minimum: 0
+        followerCount:
+          type: integer
+          minimum: 0
+        isFollowed:
+          type: boolean
+        status:
+          type: string
+          enum:
+            - active
+            - hidden
+        createdAt:
+          type: string
+          format: date-time
+    Post:
+      type: object
+      required:
+        - id
+        - persona
+        - topic
+        - content
+        - media
+        - reactionCounts
+        - replyCount
+        - isSaved
+        - moderationState
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        persona:
+          $ref: "#/components/schemas/Persona"
+        topic:
+          $ref: "#/components/schemas/Topic"
+        content:
+          type: string
+          maxLength: 2000
+        media:
+          type: array
+          items:
+            $ref: "#/components/schemas/MediaAsset"
+        reactionCounts:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+          example:
+            like: 12
+        userReaction:
+          type: string
+          nullable: true
+          description: The authenticated persona's reaction type, if any.
+        isSaved:
+          type: boolean
+          description: True when the authenticated persona has saved this note.
+        replyCount:
+          type: integer
+          minimum: 0
+        moderationState:
+          type: string
+          enum:
+            - published
+            - pendingReview
+            - rejected
+            - hidden
+            - deleted
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    PostCreateRequest:
+      type: object
+      required:
+        - content
+        - topicId
+      properties:
+        personaId:
+          type: string
+          format: uuid
+          description: Override the default persona for this note.
+        topicId:
+          type: string
+          format: uuid
+        content:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        mediaIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Placeholder; ignored in the first slice.
+    PostUpdateRequest:
+      type: object
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        topicId:
+          type: string
+          format: uuid
+    Comment:
+      type: object
+      required:
+        - id
+        - persona
+        - postId
+        - content
+        - reactionCounts
+        - moderationState
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        persona:
+          $ref: "#/components/schemas/Persona"
+        postId:
+          type: string
+          format: uuid
+        content:
+          type: string
+          maxLength: 2000
+        reactionCounts:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+          example:
+            like: 3
+        userReaction:
+          type: string
+          nullable: true
+        moderationState:
+          type: string
+          enum:
+            - published
+            - pendingReview
+            - rejected
+            - hidden
+            - deleted
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CommentCreateRequest:
+      type: object
+      required:
+        - content
+      properties:
+        personaId:
+          type: string
+          format: uuid
+          description: Override the default persona for this reply.
+        content:
+          type: string
+          minLength: 1
+          maxLength: 2000
+    CommentUpdateRequest:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 2000
+    MediaAsset:
+      type: object
+      required:
+        - id
+        - url
+        - mimeType
+        - width
+        - height
+      properties:
+        id:
+          type: string
+          format: uuid
+        url:
+          type: string
+          format: uri
+        mimeType:
+          type: string
+        width:
+          type: integer
+          minimum: 1
+        height:
+          type: integer
+          minimum: 1
+        thumbnailUrl:
+          type: string
+          format: uri
+    MediaUploadIntentRequest:
+      type: object
+      required:
+        - mimeType
+        - sizeBytes
+        - checksum
+      properties:
+        mimeType:
+          type: string
+          description: MIME type of the media file.
+          enum:
+            - image/jpeg
+            - image/png
+            - image/gif
+            - image/webp
+        sizeBytes:
+          type: integer
+          minimum: 1
+          maximum: 10485760
+          description: Size of the media file in bytes.
+        checksum:
+          type: string
+          description: Client-provided checksum (e.g., SHA-256) for integrity verification.
+          maxLength: 128
+    MediaUploadIntentResponse:
+      type: object
+      required:
+        - assetId
+        - uploadUrl
+        - mimeType
+        - sizeBytes
+        - checksum
+        - status
+      properties:
+        assetId:
+          type: string
+          format: uuid
+        uploadUrl:
+          type: string
+          format: uri
+          description: Signed URL for uploading the media bytes.
+        mimeType:
+          type: string
+        sizeBytes:
+          type: integer
+        checksum:
+          type: string
+        status:
+          type: string
+          enum:
+            - pending
+    Reaction:
+      type: object
+      required:
+        - id
+        - persona
+        - type
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        persona:
+          $ref: "#/components/schemas/Persona"
+        type:
+          $ref: "#/components/schemas/ReactionType"
+        createdAt:
+          type: string
+          format: date-time
+    ReactionType:
+      type: string
+      enum:
+        - like
+    ReactionSummary:
+      type: object
+      required:
+        - reactionCounts
+        - userReaction
+      properties:
+        reactionCounts:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+        userReaction:
+          type: string
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/ReactionType"
+    ReactionCreateRequest:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          $ref: "#/components/schemas/ReactionType"
+    Report:
+      type: object
+      required:
+        - id
+        - targetType
+        - targetId
+        - category
+        - status
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        targetType:
+          type: string
+          enum:
+            - post
+            - comment
+            - persona
+        targetId:
+          type: string
+          format: uuid
+        category:
+          type: string
+          enum:
+            - harassment
+            - hateSpeech
+            - harmfulContent
+            - spam
+            - sexualContent
+            - doxxing
+            - impersonation
+            - illegalContent
+            - other
+        details:
+          type: string
+          nullable: true
+          maxLength: 2000
+        status:
+          type: string
+          enum:
+            - open
+            - resolved
+        createdAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          type: string
+          format: date-time
+          nullable: true
+    ReportCreateRequest:
+      type: object
+      required:
+        - targetType
+        - targetId
+        - category
+      properties:
+        targetType:
+          type: string
+          enum:
+            - post
+            - comment
+            - persona
+        targetId:
+          type: string
+          format: uuid
+        category:
+          type: string
+          enum:
+            - harassment
+            - hateSpeech
+            - harmfulContent
+            - spam
+            - sexualContent
+            - doxxing
+            - impersonation
+            - illegalContent
+            - other
+        details:
+          type: string
+          maxLength: 2000
+    Block:
+      type: object
+      required:
+        - id
+        - persona
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        persona:
+          $ref: "#/components/schemas/Persona"
+        createdAt:
+          type: string
+          format: date-time
+    BlockCreateRequest:
+      type: object
+      required:
+        - personaId
+      properties:
+        personaId:
+          type: string
+          format: uuid
+    ModerationCase:
+      type: object
+      required:
+        - id
+        - targetType
+        - targetId
+        - reportIds
+        - status
+        - outcome
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        targetType:
+          type: string
+          enum:
+            - post
+            - comment
+            - persona
+        targetId:
+          type: string
+          format: uuid
+        reportIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        status:
+          type: string
+          enum:
+            - open
+            - underReview
+            - resolved
+        outcome:
+          type: string
+          nullable: true
+          enum:
+            - noAction
+            - warn
+            - hide
+            - remove
+            - restore
+            - restrictPersona
+            - suspendAccount
+            - banAccount
+          description: Null until the case is resolved.
+        notes:
+          type: string
+          maxLength: 4000
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ModerationCaseCreateRequest:
+      type: object
+      required:
+        - targetType
+        - targetId
+        - reportIds
+      properties:
+        targetType:
+          type: string
+          enum:
+            - post
+            - comment
+            - persona
+        targetId:
+          type: string
+          format: uuid
+        reportIds:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: uuid
+    ModerationCaseUpdateRequest:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - underReview
+            - resolved
+        outcome:
+          type: string
+          enum:
+            - noAction
+            - warn
+            - hide
+            - remove
+            - restore
+            - restrictPersona
+            - suspendAccount
+            - banAccount
+        notes:
+          type: string
+          maxLength: 4000
+    EmailCodeRequest:
+      type: object
+      required:
+        - email
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        purpose:
+          type: string
+          enum:
+            - login
+            - email_change
+            - deletion
+          default: login
+          description: Purpose of the verification code.
+    EmailSessionRequest:
+      type: object
+      required:
+        - email
+        - code
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        code:
+          type: string
+          pattern: "^[0-9]{6}$"
+    RefreshTokenRequest:
+      type: object
+      required:
+        - refreshToken
+      properties:
+        refreshToken:
+          type: string
+    AccountDeletionRequest:
+      type: object
+      required:
+        - verificationCode
+      properties:
+        verificationCode:
+          type: string
+          pattern: "^[0-9]{6}$"
+    AccountDeletionState:
+      type: object
+      required:
+        - gracePeriodEndsAt
+      properties:
+        gracePeriodEndsAt:
+          type: string
+          format: date-time
+    EmailChangeRequest:
+      type: object
+      required:
+        - newEmail
+      properties:
+        newEmail:
+          type: string
+          format: email
+          maxLength: 254
+    EmailChangeConfirmation:
+      type: object
+      required:
+        - newEmail
+        - verificationCode
+      properties:
+        newEmail:
+          type: string
+          format: email
+          maxLength: 254
+        verificationCode:
+          type: string
+          pattern: "^[0-9]{6}$"
+    DataExportRequest:
+      type: object
+      required:
+        - format
+      properties:
+        format:
+          type: string
+          enum:
+            - json
+            - zip
+    DataExport:
+      type: object
+      required:
+        - id
+        - status
+        - format
+        - requestedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - pending
+            - ready
+            - expired
+        format:
+          type: string
+          enum:
+            - json
+            - zip
+        requestedAt:
+          type: string
+          format: date-time
+        readyAt:
+          type: string
+          format: date-time
+          nullable: true
+        downloadUrl:
+          type: string
+          format: uri
+          nullable: true
+    Appeal:
+      type: object
+      required:
+        - id
+        - actionType
+        - reason
+        - status
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        actionType:
+          type: string
+          enum:
+            - warn
+            - suspend
+        reason:
+          type: string
+          maxLength: 2000
+        status:
+          type: string
+          enum:
+            - pending
+            - resolved
+        createdAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          type: string
+          format: date-time
+          nullable: true
+    AppealCreateRequest:
+      type: object
+      required:
+        - actionType
+        - reason
+      properties:
+        actionType:
+          type: string
+          enum:
+            - warn
+            - suspend
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 2000
+    CursorPage:
+      type: object
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+        pagination:
+          type: object
+          required:
+            - nextCursor
+            - hasMore
+          properties:
+            nextCursor:
+              type: string
+              nullable: true
+            hasMore:
+              type: boolean
+    CursorPagePost:
+      allOf:
+        - $ref: "#/components/schemas/CursorPage"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/Post"
+    CursorPageComment:
+      allOf:
+        - $ref: "#/components/schemas/CursorPage"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/Comment"
+    CursorPageReaction:
+      allOf:
+        - $ref: "#/components/schemas/CursorPage"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/Reaction"
+    CursorPageTopic:
+      allOf:
+        - $ref: "#/components/schemas/CursorPage"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/Topic"
+    CursorPageBlock:
+      allOf:
+        - $ref: "#/components/schemas/CursorPage"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/Block"
+    CursorPageModerationCase:
+      allOf:
+        - $ref: "#/components/schemas/CursorPage"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/ModerationCase"
+  responses:
+    BadRequest:
+      description: The request was malformed or failed basic validation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Authentication is required or the access token is invalid/expired.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: The authenticated principal lacks permission for the resource.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: The requested resource was not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: The request conflicts with the current state (duplicate, idempotency mismatch, etc.).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UnprocessableEntity:
+      description: The request was syntactically valid but semantically invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: Too many requests. Retry after the period indicated by `Retry-After`.
+      headers:
+        Retry-After:
+          description: Seconds until the client may retry.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
