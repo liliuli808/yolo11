@@ -117,3 +117,7 @@ func (keyBuilder) ip(prefix, ip string) string {
 func (keyBuilder) fingerprint(prefix, fp string) string {
 	return fmt.Sprintf("%s:fp:%s", prefix, fp)
 }
+
+func (keyBuilder) username(prefix, username string) string {
+	return fmt.Sprintf("%s:username:%s", prefix, username)
+}
