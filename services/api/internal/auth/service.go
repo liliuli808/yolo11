@@ -10,31 +10,32 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math/big"
-	"net/mail"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/yiguan/api/internal/platform/config"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Common auth domain errors.
 var (
-	ErrInvalidEmail           = errors.New("invalid email")
-	ErrInvalidCode            = errors.New("invalid or expired verification code")
-	ErrRateLimited            = errors.New("rate limited")
-	ErrSessionExpired         = errors.New("session expired")
-	ErrSessionRevoked         = errors.New("session revoked")
-	ErrInvalidToken           = errors.New("invalid token")
-	ErrUserNotFound           = errors.New("user not found")
-	ErrDeletionAlreadyPending = errors.New("account deletion already pending")
-	ErrDeletionInvalidCode    = errors.New("invalid deletion verification code")
-	ErrUsernameTaken          = errors.New("username already taken")
-	ErrInvalidCredentials     = errors.New("invalid username or password")
-	ErrCaptchaFailed          = errors.New("captcha verification failed")
-	ErrInvalidUsername        = errors.New("invalid username")
-	ErrInvalidPassword        = errors.New("invalid password")
+	ErrInvalidEmail            = errors.New("invalid email")
+	ErrInvalidCode             = errors.New("invalid or expired verification code")
+	ErrRateLimited             = errors.New("rate limited")
+	ErrSessionExpired          = errors.New("session expired")
+	ErrSessionRevoked          = errors.New("session revoked")
+	ErrInvalidToken            = errors.New("invalid token")
+	ErrUserNotFound            = errors.New("user not found")
+	ErrDeletionAlreadyPending  = errors.New("account deletion already pending")
+	ErrDeletionInvalidCode     = errors.New("invalid deletion verification code")
+	ErrDeletionInvalidPassword = errors.New("invalid deletion password")
+	ErrUsernameTaken           = errors.New("username already taken")
+	ErrInvalidCredentials      = errors.New("invalid username or password")
+	ErrCaptchaFailed           = errors.New("captcha verification failed")
+	ErrInvalidUsername         = errors.New("invalid username")
+	ErrInvalidPassword         = errors.New("invalid password")
 )
 
 // RateLimitError carries the retry window for a rate-limited request.
@@ -55,6 +56,10 @@ type TokenResponse struct {
 	ExpiresIn    int
 	PersonaID    *string
 	IsStaff      bool
+	// SessionID identifies the created session.
+	SessionID string
+	// UserID identifies the authenticated user.
+	UserID string
 }
 
 // AccessTokenResponse is returned when an access token is refreshed.
@@ -94,13 +99,14 @@ type accessClaims struct {
 
 // Service implements the auth domain logic.
 type Service struct {
-	cfg     *config.Config
-	repo    Repository
-	mailer  Mailer
-	limiter RateLimiter
-	signer  []byte
-	codeKey []byte
-	keys    keyBuilder
+	cfg       *config.Config
+	repo      Repository
+	mailer    Mailer
+	limiter   RateLimiter
+	turnstile TurnstileVerifier
+	signer    []byte
+	codeKey   []byte
+	keys      keyBuilder
 
 	// IdentityCleanup is an optional hook invoked when an account enters the
 	// deletion grace period. It is used by the identity subsystem to archive
@@ -109,107 +115,125 @@ type Service struct {
 }
 
 // NewService creates a new auth Service.
-func NewService(cfg *config.Config, repo Repository, mailer Mailer, limiter RateLimiter) *Service {
+func NewService(cfg *config.Config, repo Repository, mailer Mailer, limiter RateLimiter, turnstile TurnstileVerifier) *Service {
 	return &Service{
-		cfg:     cfg,
-		repo:    repo,
-		mailer:  mailer,
-		limiter: limiter,
-		signer:  []byte(cfg.JWTSigningKey),
-		codeKey: []byte(cfg.EmailCodeKey),
+		cfg:       cfg,
+		repo:      repo,
+		mailer:    mailer,
+		limiter:   limiter,
+		turnstile: turnstile,
+		signer:    []byte(cfg.JWTSigningKey),
+		codeKey:   []byte(cfg.EmailCodeKey),
 	}
 }
 
 // Predefined rate limits. These apply independently by scope.
 var (
-	codeRequestByEmail = RateLimit{Count: 5, Window: 10 * time.Minute}
-	codeRequestByIP    = RateLimit{Count: 20, Window: 10 * time.Minute}
-	codeRequestByFP    = RateLimit{Count: 10, Window: 10 * time.Minute}
+	registerByUsername = RateLimit{Count: 5, Window: 10 * time.Minute}
+	registerByIP       = RateLimit{Count: 20, Window: 10 * time.Minute}
+	registerByFP       = RateLimit{Count: 10, Window: 10 * time.Minute}
 
-	codeVerifyByEmail = RateLimit{Count: 10, Window: 10 * time.Minute}
-	codeVerifyByIP    = RateLimit{Count: 40, Window: 10 * time.Minute}
-	codeVerifyByFP    = RateLimit{Count: 20, Window: 10 * time.Minute}
+	loginByUsername = RateLimit{Count: 10, Window: 10 * time.Minute}
+	loginByIP       = RateLimit{Count: 40, Window: 10 * time.Minute}
+	loginByFP       = RateLimit{Count: 20, Window: 10 * time.Minute}
 )
 
-// RequestEmailCode generates a six-digit code, hashes it with a keyed hash,
-// stores it, and sends it to the supplied email address.
-func (s *Service) RequestEmailCode(ctx context.Context, email, purpose, ip, fingerprint string) error {
-	if err := validateEmail(email); err != nil {
-		return ErrInvalidEmail
+// Register creates a user with username/password and a session.
+func (s *Service) Register(ctx context.Context, username, password, turnstileToken, ip, fingerprint, userAgent string) (*TokenResponse, error) {
+	if err := s.verifyTurnstile(ctx, turnstileToken); err != nil {
+		return nil, err
 	}
-	normalized := NormalizeEmail(email)
-
-	if allowed, retryAfter, err := s.limiter.Allow(ctx, s.keys.email("code:request", normalized), codeRequestByEmail); err != nil || !allowed {
-		return &RateLimitError{RetryAfter: retryAfter}
+	normalized := NormalizeUsername(username)
+	if err := validateUsername(normalized); err != nil {
+		return nil, ErrInvalidUsername
 	}
-	if allowed, retryAfter, err := s.limiter.Allow(ctx, s.keys.ip("code:request", ip), codeRequestByIP); err != nil || !allowed {
-		return &RateLimitError{RetryAfter: retryAfter}
-	}
-	if allowed, retryAfter, err := s.limiter.Allow(ctx, s.keys.fingerprint("code:request", fingerprint), codeRequestByFP); err != nil || !allowed {
-		return &RateLimitError{RetryAfter: retryAfter}
+	if err := validatePassword(password); err != nil {
+		return nil, ErrInvalidPassword
 	}
 
-	user, err := s.repo.FindOrCreateUserByEmail(ctx, email)
+	if allowed, retryAfter, err := s.limiter.Allow(ctx, s.keys.username("register", normalized), registerByUsername); err != nil || !allowed {
+		return nil, &RateLimitError{RetryAfter: retryAfter}
+	}
+	if allowed, retryAfter, err := s.limiter.Allow(ctx, s.keys.ip("register", ip), registerByIP); err != nil || !allowed {
+		return nil, &RateLimitError{RetryAfter: retryAfter}
+	}
+	if allowed, retryAfter, err := s.limiter.Allow(ctx, s.keys.fingerprint("register", fingerprint), registerByFP); err != nil || !allowed {
+		return nil, &RateLimitError{RetryAfter: retryAfter}
+	}
+
+	existing, err := s.repo.GetUserByUsername(ctx, normalized)
 	if err != nil {
-		return fmt.Errorf("lookup user: %w", err)
+		return nil, fmt.Errorf("check username: %w", err)
+	}
+	if existing != nil {
+		return nil, ErrUsernameTaken
 	}
 
-	code, err := generateEmailCode()
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		return fmt.Errorf("generate code: %w", err)
+		return nil, fmt.Errorf("hash password: %w", err)
 	}
 
-	hash := hashEmailCode(s.codeKey, code)
-	expiresAt := time.Now().UTC().Add(10 * time.Minute)
-
-	if err := s.repo.CreateEmailCode(ctx, &EmailCode{
-		UserID:      &user.ID,
-		Email:       normalized,
-		CodeHash:    hash,
-		Purpose:     purpose,
-		ExpiresAt:   expiresAt,
-		MaxAttempts: 5,
-		IPAddress:   ip,
-		Fingerprint: fingerprint,
-	}); err != nil {
-		return fmt.Errorf("store code: %w", err)
+	user, err := s.repo.CreateUser(ctx, normalized, string(hash))
+	if err != nil {
+		return nil, fmt.Errorf("create user: %w", err)
 	}
 
-	if err := s.mailer.SendEmailCode(ctx, normalized, code, 10*time.Minute); err != nil {
-		return fmt.Errorf("send code: %w", err)
+	tokens, err := s.createSession(ctx, user.ID, s.isStaff(user.Username), ip, fingerprint, userAgent)
+	if err != nil {
+		return nil, err
 	}
+	tokens.UserID = user.ID
 
-	s.audit(ctx, &user.ID, nil, "email_code.requested", ip, "", fingerprint, map[string]any{"purpose": purpose})
-	return nil
+	s.audit(ctx, &user.ID, &tokens.SessionID, "account.registered", ip, userAgent, fingerprint, nil)
+	return tokens, nil
 }
 
-// CreateEmailSession verifies a code and creates a session with access and
-// refresh tokens.
-func (s *Service) CreateEmailSession(ctx context.Context, email, code, ip, fingerprint, userAgent string) (*TokenResponse, error) {
-	if err := validateEmail(email); err != nil {
-		return nil, ErrInvalidEmail
+// Login validates credentials and creates a session.
+func (s *Service) Login(ctx context.Context, username, password, turnstileToken, ip, fingerprint, userAgent string) (*TokenResponse, error) {
+	if err := s.verifyTurnstile(ctx, turnstileToken); err != nil {
+		return nil, err
 	}
-	normalized := NormalizeEmail(email)
-
-	if allowed, retryAfter, err := s.limiter.Allow(ctx, s.keys.email("code:verify", normalized), codeVerifyByEmail); err != nil || !allowed {
-		return nil, &RateLimitError{RetryAfter: retryAfter}
+	normalized := NormalizeUsername(username)
+	if err := validateUsername(normalized); err != nil {
+		return nil, ErrInvalidCredentials
 	}
-	if allowed, retryAfter, err := s.limiter.Allow(ctx, s.keys.ip("code:verify", ip), codeVerifyByIP); err != nil || !allowed {
-		return nil, &RateLimitError{RetryAfter: retryAfter}
-	}
-	if allowed, retryAfter, err := s.limiter.Allow(ctx, s.keys.fingerprint("code:verify", fingerprint), codeVerifyByFP); err != nil || !allowed {
-		return nil, &RateLimitError{RetryAfter: retryAfter}
+	if password == "" {
+		return nil, ErrInvalidCredentials
 	}
 
-	user, err := s.repo.FindOrCreateUserByEmail(ctx, email)
+	if allowed, retryAfter, err := s.limiter.Allow(ctx, s.keys.username("login", normalized), loginByUsername); err != nil || !allowed {
+		return nil, &RateLimitError{RetryAfter: retryAfter}
+	}
+	if allowed, retryAfter, err := s.limiter.Allow(ctx, s.keys.ip("login", ip), loginByIP); err != nil || !allowed {
+		return nil, &RateLimitError{RetryAfter: retryAfter}
+	}
+	if allowed, retryAfter, err := s.limiter.Allow(ctx, s.keys.fingerprint("login", fingerprint), loginByFP); err != nil || !allowed {
+		return nil, &RateLimitError{RetryAfter: retryAfter}
+	}
+
+	user, err := s.repo.GetUserByUsername(ctx, normalized)
 	if err != nil {
 		return nil, fmt.Errorf("lookup user: %w", err)
 	}
+	if user == nil {
+		return nil, ErrInvalidCredentials
+	}
+	if user.PasswordHash == "" || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+		return nil, ErrInvalidCredentials
+	}
 
-	if err := s.VerifyEmailCode(ctx, normalized, code, "login"); err != nil {
+	tokens, err := s.createSession(ctx, user.ID, s.isStaff(user.Username), ip, fingerprint, userAgent)
+	if err != nil {
 		return nil, err
 	}
 
+	s.audit(ctx, &user.ID, &tokens.SessionID, "session.created", ip, userAgent, fingerprint, map[string]any{"is_staff": s.isStaff(user.Username)})
+	return tokens, nil
+}
+
+// createSession builds a session for the user and returns access + refresh tokens.
+func (s *Service) createSession(ctx context.Context, userID string, isStaff bool, ip, fingerprint, userAgent string) (*TokenResponse, error) {
 	refreshToken, refreshHash, err := s.newRefreshToken()
 	if err != nil {
 		return nil, fmt.Errorf("generate refresh token: %w", err)
@@ -217,7 +241,7 @@ func (s *Service) CreateEmailSession(ctx context.Context, email, code, ip, finge
 
 	now := time.Now().UTC()
 	session := &Session{
-		UserID:           user.ID,
+		UserID:           userID,
 		RefreshTokenHash: refreshHash,
 		ExpiresAt:        now.Add(s.cfg.RefreshTokenTTL),
 		IPAddress:        ip,
@@ -228,20 +252,31 @@ func (s *Service) CreateEmailSession(ctx context.Context, email, code, ip, finge
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 
-	accessToken, expiresIn, err := s.issueAccessToken(user.ID, session.ID, s.isStaff(user.EmailNormalized))
+	accessToken, expiresIn, err := s.issueAccessToken(userID, session.ID, isStaff)
 	if err != nil {
 		return nil, fmt.Errorf("issue access token: %w", err)
 	}
-
-	s.audit(ctx, &user.ID, &session.ID, "session.created", ip, userAgent, fingerprint, map[string]any{"is_staff": s.isStaff(user.EmailNormalized)})
 
 	return &TokenResponse{
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 		TokenType:    "Bearer",
 		ExpiresIn:    expiresIn,
-		IsStaff:      s.isStaff(user.EmailNormalized),
+		IsStaff:      isStaff,
+		SessionID:    session.ID,
 	}, nil
+}
+
+// VerifyPasswordForDeletion checks the account password to confirm deletion.
+func (s *Service) VerifyPasswordForDeletion(ctx context.Context, userID, password string) error {
+	user, err := s.repo.GetUserByID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrUserNotFound, err)
+	}
+	if user.PasswordHash == "" || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+		return ErrDeletionInvalidPassword
+	}
+	return nil
 }
 
 // VerifyEmailCode checks an active code for the given email and purpose and
@@ -309,7 +344,7 @@ func (s *Service) RefreshSession(ctx context.Context, refreshToken, ip, fingerpr
 		return nil, fmt.Errorf("lookup user: %w", err)
 	}
 
-	accessToken, expiresIn, err := s.issueAccessToken(session.UserID, newSession.ID, s.isStaff(user.EmailNormalized))
+	accessToken, expiresIn, err := s.issueAccessToken(session.UserID, newSession.ID, s.isStaff(user.Username))
 	if err != nil {
 		return nil, fmt.Errorf("issue access token: %w", err)
 	}
@@ -321,7 +356,7 @@ func (s *Service) RefreshSession(ctx context.Context, refreshToken, ip, fingerpr
 			AccessToken: accessToken,
 			TokenType:   "Bearer",
 			ExpiresIn:   expiresIn,
-			IsStaff:     s.isStaff(user.EmailNormalized),
+			IsStaff:     s.isStaff(user.Username),
 		},
 		RefreshToken: newRefreshToken,
 	}, nil
@@ -453,15 +488,6 @@ func hashRefreshToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func generateEmailCode() (string, error) {
-	const max = 1_000_000
-	n, err := rand.Int(rand.Reader, big.NewInt(max))
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%06d", n.Int64()), nil
-}
-
 func hashEmailCode(key []byte, code string) string {
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(code))
@@ -472,32 +498,45 @@ func hmacEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-func validateEmail(email string) error {
-	email = strings.TrimSpace(email)
-	if email == "" || len(email) > 254 {
-		return ErrInvalidEmail
-	}
-	addr, err := mail.ParseAddress(email)
-	if err != nil {
-		return ErrInvalidEmail
-	}
-	if NormalizeEmail(addr.Address) != NormalizeEmail(email) {
-		return ErrInvalidEmail
+var usernameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{2,19}$`)
+
+// NormalizeUsername lowercases and trims a username.
+func NormalizeUsername(username string) string {
+	return strings.ToLower(strings.TrimSpace(username))
+}
+
+func validateUsername(username string) error {
+	if !usernameRe.MatchString(username) {
+		return ErrInvalidUsername
 	}
 	return nil
 }
 
-func (s *Service) isStaff(email string) bool {
-	if len(s.cfg.StaffEmails) == 0 {
+func validatePassword(password string) error {
+	if len(password) < 8 {
+		return ErrInvalidPassword
+	}
+	return nil
+}
+
+func (s *Service) isStaff(username string) bool {
+	if len(s.cfg.StaffUsernames) == 0 {
 		return false
 	}
-	normalized := NormalizeEmail(email)
-	for _, e := range s.cfg.StaffEmails {
-		if NormalizeEmail(e) == normalized {
+	normalized := NormalizeUsername(username)
+	for _, u := range s.cfg.StaffUsernames {
+		if NormalizeUsername(u) == normalized {
 			return true
 		}
 	}
 	return false
+}
+
+func (s *Service) verifyTurnstile(ctx context.Context, token string) error {
+	if s.turnstile == nil {
+		return nil
+	}
+	return s.turnstile.Verify(ctx, token)
 }
 
 func (s *Service) audit(ctx context.Context, userID, sessionID *string, eventType, ip, userAgent, fingerprint string, metadata map[string]any) {
