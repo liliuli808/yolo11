@@ -34,7 +34,7 @@ security:
   - BearerAuth: []
 tags:
   - name: Auth
-    description: Email-based authentication and session management.
+    description: Username/password authentication and session management.
   - name: Identity
     description: Real profile and anonymous persona management.
   - name: Topics
