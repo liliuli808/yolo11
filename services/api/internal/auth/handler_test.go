@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -18,7 +19,7 @@ func setupHandlerTest(t *testing.T) (*Handler, *recordingMailer) {
 	repo := NewPostgresRepository(testDB)
 	mailer := &recordingMailer{}
 	limiter := NewMemoryLimiter()
-	svc := NewService(cfg, repo, mailer, limiter)
+	svc := NewService(cfg, repo, mailer, limiter, &StubTurnstile{})
 	return NewHandler(svc, cfg), mailer
 }
 
@@ -30,44 +31,22 @@ func mountHandler(h *Handler) http.Handler {
 	return r
 }
 
-func TestHandler_SendEmailCode(t *testing.T) {
-	h, _ := setupHandlerTest(t)
-	server := httptest.NewServer(mountHandler(h))
-	defer server.Close()
-
-	body, _ := json.Marshal(map[string]any{"email": "handler@example.com", "purpose": "login"})
-	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/email-codes", bytes.NewReader(body))
+func registerSession(t *testing.T, serverURL, username, password string) sessionResponse {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"username": username, "password": password, "turnstileToken": "tok"})
+	if err != nil {
+		t.Fatalf("marshal register body: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, serverURL+"/v1/auth/register", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build register request: %v", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", "send-email-code-key-1")
+	req.Header.Set("Idempotency-Key", "register-key-"+username)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("post email codes: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("expected %d, got %d", http.StatusNoContent, resp.StatusCode)
-	}
-}
-
-func TestHandler_CreateEmailSession(t *testing.T) {
-	h, mailer := setupHandlerTest(t)
-	server := httptest.NewServer(mountHandler(h))
-	defer server.Close()
-
-	if err := h.service.RequestEmailCode(context.Background(), "session@example.com", "login", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request code: %v", err)
-	}
-
-	body, _ := json.Marshal(map[string]string{"email": "session@example.com", "code": mailer.LastCode()})
-	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/email-sessions", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", "create-email-session-key-1")
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("post email sessions: %v", err)
+		t.Fatalf("post register: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -80,10 +59,36 @@ func TestHandler_CreateEmailSession(t *testing.T) {
 		t.Fatalf("decode session: %v", err)
 	}
 	if session.AccessToken == "" {
-		t.Error("expected access token")
+		t.Fatal("expected access token")
 	}
+	return session
+}
+
+func registerSessionToken(t *testing.T, svc *Service, username, password string) sessionResponse {
+	t.Helper()
+	tokens, err := svc.Register(context.Background(), username, password, "tok", "127.0.0.1", "fp", "ua")
+	if err != nil {
+		t.Fatalf("register %s: %v", username, err)
+	}
+	return sessionResponse{
+		AccessToken:  tokens.AccessToken,
+		RefreshToken: tokens.RefreshToken,
+		TokenType:    tokens.TokenType,
+		ExpiresIn:    tokens.ExpiresIn,
+		UserID:       tokens.UserID,
+		PersonaID:    tokens.PersonaID,
+		IsStaff:      tokens.IsStaff,
+	}
+}
+
+func TestHandler_Register(t *testing.T) {
+	h, _ := setupHandlerTest(t)
+	server := httptest.NewServer(mountHandler(h))
+	defer server.Close()
+
+	session := registerSession(t, server.URL, "hanna", "password123")
 	if session.RefreshToken == "" {
-		t.Error("expected refresh token in body")
+		t.Error("expected refresh token")
 	}
 	if session.TokenType != "Bearer" {
 		t.Errorf("expected Bearer, got %q", session.TokenType)
@@ -91,31 +96,57 @@ func TestHandler_CreateEmailSession(t *testing.T) {
 	if session.ExpiresIn == 0 {
 		t.Error("expected positive expires_in")
 	}
-
-	found := false
-	for _, c := range resp.Cookies() {
-		if c.Name == refreshTokenCookie && c.Value != "" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("expected refresh token cookie")
+	if session.UserID == "" {
+		t.Error("expected user id")
 	}
 }
 
-func TestHandler_CreateEmailSession_InvalidCode(t *testing.T) {
+func TestHandler_Login(t *testing.T) {
 	h, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountHandler(h))
 	defer server.Close()
 
-	body, _ := json.Marshal(map[string]string{"email": "badcode@example.com", "code": "000000"})
-	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/email-sessions", bytes.NewReader(body))
+	registerSession(t, server.URL, "harold", "password123")
+
+	body, _ := json.Marshal(map[string]any{"username": "harold", "password": "password123"})
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/login", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", "invalid-code-key-1")
+	req.Header.Set("Idempotency-Key", "login-key-harold")
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("post email sessions: %v", err)
+		t.Fatalf("post login: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
+	var session sessionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+	if session.AccessToken == "" {
+		t.Error("expected access token")
+	}
+}
+
+func TestHandler_Login_WrongPassword(t *testing.T) {
+	h, _ := setupHandlerTest(t)
+	server := httptest.NewServer(mountHandler(h))
+	defer server.Close()
+
+	registerSession(t, server.URL, "harriet", "password123")
+
+	body, _ := json.Marshal(map[string]any{"username": "harriet", "password": "wrongpass"})
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "login-wrong-key-1")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("post login: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -127,26 +158,50 @@ func TestHandler_CreateEmailSession_InvalidCode(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		t.Fatalf("decode error: %v", err)
 	}
-	if envelope["code"] != "AUTH.INVALID_CODE" {
-		t.Errorf("expected AUTH.INVALID_CODE, got %v", envelope["code"])
+	if envelope["code"] != "AUTH.INVALID_CREDENTIALS" {
+		t.Errorf("expected AUTH.INVALID_CREDENTIALS, got %v", envelope["code"])
+	}
+}
+
+func TestHandler_Register_UsernameTaken(t *testing.T) {
+	h, _ := setupHandlerTest(t)
+	server := httptest.NewServer(mountHandler(h))
+	defer server.Close()
+
+	registerSession(t, server.URL, "dave", "password123")
+
+	body, _ := json.Marshal(map[string]any{"username": "Dave", "password": "password123", "turnstileToken": "tok"})
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "register-key-dave-2")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("post register: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected %d, got %d", http.StatusConflict, resp.StatusCode)
+	}
+
+	var envelope map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if envelope["code"] != "AUTH.USERNAME_TAKEN" {
+		t.Errorf("expected AUTH.USERNAME_TAKEN, got %v", envelope["code"])
 	}
 }
 
 func TestHandler_RefreshSession(t *testing.T) {
-	h, mailer := setupHandlerTest(t)
+	h, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountHandler(h))
 	defer server.Close()
 
-	ctx := context.Background()
-	if err := h.service.RequestEmailCode(ctx, "refresh@example.com", "login", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request code: %v", err)
-	}
-	tokens, err := h.service.CreateEmailSession(ctx, "refresh@example.com", mailer.LastCode(), "127.0.0.1", "fp1", "ua")
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
+	session := registerSessionToken(t, h.service, "helen", "password123")
 
-	body, _ := json.Marshal(map[string]string{"refreshToken": tokens.RefreshToken})
+	body, _ := json.Marshal(map[string]string{"refreshToken": session.RefreshToken})
 	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/refresh", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", "refresh-session-key-1")
@@ -181,21 +236,14 @@ func TestHandler_RefreshSession(t *testing.T) {
 }
 
 func TestHandler_DeleteSession(t *testing.T) {
-	h, mailer := setupHandlerTest(t)
+	h, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountHandler(h))
 	defer server.Close()
 
-	ctx := context.Background()
-	if err := h.service.RequestEmailCode(ctx, "logout@example.com", "login", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request code: %v", err)
-	}
-	tokens, err := h.service.CreateEmailSession(ctx, "logout@example.com", mailer.LastCode(), "127.0.0.1", "fp1", "ua")
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
+	session := registerSessionToken(t, h.service, "hugo", "password123")
 
 	req, _ := http.NewRequest(http.MethodDelete, server.URL+"/v1/auth/session", nil)
-	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	req.Header.Set("Idempotency-Key", "delete-session-key-1")
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
@@ -209,7 +257,7 @@ func TestHandler_DeleteSession(t *testing.T) {
 	}
 
 	// Refreshing with the old token should now fail.
-	body, _ := json.Marshal(map[string]string{"refreshToken": tokens.RefreshToken})
+	body, _ := json.Marshal(map[string]string{"refreshToken": session.RefreshToken})
 	req2, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/refresh", bytes.NewReader(body))
 	req2.Header.Set("Content-Type", "application/json")
 	req2.Header.Set("Idempotency-Key", "refresh-after-logout-key-1")
@@ -224,30 +272,15 @@ func TestHandler_DeleteSession(t *testing.T) {
 }
 
 func TestHandler_DeleteMe(t *testing.T) {
-	h, mailer := setupHandlerTest(t)
+	h, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountHandler(h))
 	defer server.Close()
 
-	ctx := context.Background()
-	email := "deleteme@example.com"
-	if err := h.service.RequestEmailCode(ctx, email, "login", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request code: %v", err)
-	}
-	loginCode := mailer.LastCode()
-	tokens, err := h.service.CreateEmailSession(ctx, email, loginCode, "127.0.0.1", "fp1", "ua")
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
+	session := registerSessionToken(t, h.service, "deleteme", "password123")
 
-	// Request a deletion-purpose confirmation code.
-	if err := h.service.RequestEmailCode(ctx, email, "deletion", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request deletion code: %v", err)
-	}
-	deleteCode := mailer.LastCode()
-
-	body, _ := json.Marshal(map[string]string{"verificationCode": deleteCode})
+	body, _ := json.Marshal(map[string]string{"password": "password123"})
 	req, _ := http.NewRequest(http.MethodDelete, server.URL+"/v1/me", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", "delete-me-key-1")
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -270,7 +303,7 @@ func TestHandler_DeleteMe(t *testing.T) {
 	}
 
 	// Old refresh token should be rejected after deletion revokes sessions.
-	body2, _ := json.Marshal(map[string]string{"refreshToken": tokens.RefreshToken})
+	body2, _ := json.Marshal(map[string]string{"refreshToken": session.RefreshToken})
 	req2, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/refresh", bytes.NewReader(body2))
 	req2.Header.Set("Content-Type", "application/json")
 	req2.Header.Set("Idempotency-Key", "refresh-after-deletion-key-1")
@@ -285,31 +318,20 @@ func TestHandler_DeleteMe(t *testing.T) {
 }
 
 func TestHandler_DeleteMe_AlreadyPending(t *testing.T) {
-	h, mailer := setupHandlerTest(t)
+	h, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountHandler(h))
 	defer server.Close()
 
 	ctx := context.Background()
-	email := "deletepending@example.com"
-	if err := h.service.RequestEmailCode(ctx, email, "login", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request code: %v", err)
-	}
-	loginCode := mailer.LastCode()
-	tokens, err := h.service.CreateEmailSession(ctx, email, loginCode, "127.0.0.1", "fp1", "ua")
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-	userID := UserIDFromToken(ctx, h.service, tokens.AccessToken)
+	session := registerSessionToken(t, h.service, "deletepending", "password123")
+	userID := UserIDFromToken(ctx, h.service, session.AccessToken)
 	if _, err := h.service.RequestAccountDeletion(ctx, userID); err != nil {
 		t.Fatalf("first deletion: %v", err)
 	}
 
-	if err := h.service.RequestEmailCode(ctx, email, "deletion", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request second code: %v", err)
-	}
-	body, _ := json.Marshal(map[string]string{"verificationCode": mailer.LastCode()})
+	body, _ := json.Marshal(map[string]string{"password": "password123"})
 	req, _ := http.NewRequest(http.MethodDelete, server.URL+"/v1/me", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", "delete-me-pending-key-1")
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -333,23 +355,15 @@ func TestHandler_DeleteMe_AlreadyPending(t *testing.T) {
 }
 
 func TestHandler_DeleteMe_MissingIdempotencyKey(t *testing.T) {
-	h, mailer := setupHandlerTest(t)
+	h, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountHandler(h))
 	defer server.Close()
 
-	ctx := context.Background()
-	email := "deleteme-no-idempotency@example.com"
-	if err := h.service.RequestEmailCode(ctx, email, "login", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request code: %v", err)
-	}
-	tokens, err := h.service.CreateEmailSession(ctx, email, mailer.LastCode(), "127.0.0.1", "fp1", "ua")
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
+	session := registerSessionToken(t, h.service, "deletemekey", "password123")
 
-	body, _ := json.Marshal(map[string]string{"verificationCode": "000000"})
+	body, _ := json.Marshal(map[string]string{"password": "password123"})
 	req, _ := http.NewRequest(http.MethodDelete, server.URL+"/v1/me", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
@@ -373,28 +387,37 @@ func TestHandler_DeleteMe_MissingIdempotencyKey(t *testing.T) {
 
 func TestHandler_RateLimited_ReturnsContractCode(t *testing.T) {
 	h, _ := setupHandlerTest(t)
-
-	// Tighten limits for a deterministic test.
-	h.service.limiter = NewMemoryLimiter()
-	// The service hardcodes 5 requests per 10 minutes; exhaust that.
 	ctx := context.Background()
+
+	// The register per-username limit is 5 per 10 minutes and is consumed
+	// before the existing-user check. The first register succeeds, the next
+	// four return ErrUsernameTaken but still consume a username-bucket slot.
 	for i := 0; i < 5; i++ {
-		if err := h.service.RequestEmailCode(ctx, "ratelimit@example.com", "login", "127.0.0.1", "fp1"); err != nil {
-			t.Fatalf("request %d: %v", i+1, err)
+		_, err := h.service.Register(ctx, "ratelimited", "password123", "tok", "127.0.0.1", "fp1", "ua")
+		if err == nil {
+			continue
 		}
+		if !errors.Is(err, ErrUsernameTaken) {
+			t.Fatalf("register %d: expected ErrUsernameTaken, got %v", i+1, err)
+		}
+	}
+
+	var rateLimitErr *RateLimitError
+	if _, err := h.service.Register(ctx, "ratelimited", "password123", "tok", "127.0.0.1", "fp1", "ua"); !errors.As(err, &rateLimitErr) {
+		t.Fatalf("expected rate limit error, got %v", err)
 	}
 
 	server := httptest.NewServer(mountHandler(h))
 	defer server.Close()
 
-	body, _ := json.Marshal(map[string]any{"email": "ratelimit@example.com", "purpose": "login"})
-	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/email-codes", bytes.NewReader(body))
+	body, _ := json.Marshal(map[string]any{"username": "ratelimited", "password": "password123", "turnstileToken": "tok"})
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", "rate-limit-key-1")
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("post email codes: %v", err)
+		t.Fatalf("post register: %v", err)
 	}
 	defer resp.Body.Close()
 
