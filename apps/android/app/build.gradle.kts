@@ -25,6 +25,7 @@ android {
         }
 
         buildConfigField("String", "API_BASE_URL", "\"$apiBaseUrl\"")
+        buildConfigField("String", "TURNSTILE_SITE_KEY", "\"${project.findProperty("turnstileSiteKey") ?: "1x00000000000000000000AA"}\"")
     }
 
     buildTypes {
