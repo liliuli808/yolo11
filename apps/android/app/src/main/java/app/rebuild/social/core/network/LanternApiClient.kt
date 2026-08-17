@@ -6,12 +6,12 @@ class LanternApiClient @Inject constructor(
     private val service: LanternApiService
 ) : ApiClient {
 
-    override suspend fun signInWithEmail(request: SignInWithEmailRequest): Result<SignInWithEmailResponse> {
-        return runApiCall { service.signInWithEmail(request) }
+    override suspend fun register(request: RegisterRequest): Result<AuthSession> {
+        return runApiCall { service.register(request) }
     }
 
-    override suspend fun verifyEmail(request: VerifyEmailRequest): Result<VerifyEmailResponse> {
-        return runApiCall { service.verifyEmail(request) }
+    override suspend fun login(request: LoginRequest): Result<AuthSession> {
+        return runApiCall { service.login(request) }
     }
 
     private suspend fun <T : Any> runApiCall(call: suspend () -> retrofit2.Response<T>): Result<T> {

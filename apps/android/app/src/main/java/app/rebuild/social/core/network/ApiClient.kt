@@ -9,34 +9,33 @@ import retrofit2.http.POST
  * interface only exposes the endpoints required by the foundation (auth handshake).
  */
 interface ApiClient {
-    suspend fun signInWithEmail(request: SignInWithEmailRequest): Result<SignInWithEmailResponse>
-    suspend fun verifyEmail(request: VerifyEmailRequest): Result<VerifyEmailResponse>
+    suspend fun register(request: RegisterRequest): Result<AuthSession>
+    suspend fun login(request: LoginRequest): Result<AuthSession>
 }
 
 @kotlinx.serialization.Serializable
-data class SignInWithEmailRequest(
-    val email: String
+data class RegisterRequest(
+    val username: String,
+    val password: String,
+    val turnstileToken: String
 )
 
 @kotlinx.serialization.Serializable
-data class SignInWithEmailResponse(
-    val email: String,
-    val expiresInSeconds: Int
+data class LoginRequest(
+    val username: String,
+    val password: String,
+    val turnstileToken: String
 )
 
 @kotlinx.serialization.Serializable
-data class VerifyEmailRequest(
-    val email: String,
-    val code: String
-)
-
-@kotlinx.serialization.Serializable
-data class VerifyEmailResponse(
+data class AuthSession(
     val accessToken: String,
-    val refreshToken: String? = null,
+    val refreshToken: String,
+    val tokenType: String,
+    val expiresIn: Int,
     val userId: String,
-    val activePersonaId: String? = null,
-    val expiresAt: String? = null
+    val personaId: String? = null,
+    val isStaff: Boolean = false
 )
 
 /**
@@ -44,9 +43,9 @@ data class VerifyEmailResponse(
  * this one without changing the network wiring.
  */
 interface LanternApiService {
-    @POST("v1/auth/email/signin")
-    suspend fun signInWithEmail(@Body request: SignInWithEmailRequest): Response<SignInWithEmailResponse>
+    @POST("v1/auth/register")
+    suspend fun register(@Body request: RegisterRequest): Response<AuthSession>
 
-    @POST("v1/auth/email/verify")
-    suspend fun verifyEmail(@Body request: VerifyEmailRequest): Response<VerifyEmailResponse>
+    @POST("v1/auth/login")
+    suspend fun login(@Body request: LoginRequest): Response<AuthSession>
 }
