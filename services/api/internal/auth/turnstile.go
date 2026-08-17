@@ -17,19 +17,23 @@ type TurnstileVerifier interface {
 	Verify(ctx context.Context, token string) error
 }
 
+const siteverifyProductionURL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+
 // CloudflareTurnstileVerifier verifies tokens against the Siteverify API.
 type CloudflareTurnstileVerifier struct {
-	secretKey string
-	hostname  string
-	client    *http.Client
+	secretKey     string
+	hostname      string
+	client        *http.Client
+	siteverifyURL string
 }
 
 // NewCloudflareTurnstileVerifier creates a verifier from configuration.
 func NewCloudflareTurnstileVerifier(cfg *config.Config) *CloudflareTurnstileVerifier {
 	return &CloudflareTurnstileVerifier{
-		secretKey: cfg.TurnstileSecretKey,
-		hostname:  cfg.TurnstileExpectedHostname,
-		client:    &http.Client{Timeout: 5 * time.Second},
+		secretKey:     cfg.TurnstileSecretKey,
+		hostname:      cfg.TurnstileExpectedHostname,
+		client:        &http.Client{Timeout: 5 * time.Second},
+		siteverifyURL: siteverifyProductionURL,
 	}
 }
 
@@ -47,7 +51,7 @@ func (v *CloudflareTurnstileVerifier) Verify(ctx context.Context, token string) 
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://challenges.cloudflare.com/turnstile/v0/siteverify",
+		v.siteverifyURL,
 		bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("build siteverify request: %w", err)
