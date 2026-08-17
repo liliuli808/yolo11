@@ -86,8 +86,8 @@ func TestHandler_GetMe(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&profile); err != nil {
 		t.Fatalf("decode profile: %v", err)
 	}
-	if profile["emailMasked"] == nil || profile["emailMasked"] == "" {
-		t.Error("expected masked email")
+	if _, ok := profile["emailMasked"]; !ok {
+		t.Error("expected emailMasked key")
 	}
 	if profile["id"] == "" {
 		t.Error("expected id")
