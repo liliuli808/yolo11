@@ -13,6 +13,8 @@ import (
 // User is the authenticated account root used by the auth subsystem.
 type User struct {
 	ID                        string
+	Username                  string
+	PasswordHash              string
 	EmailNormalized           string
 	Status                    string
 	DeletionRequestedAt       *time.Time
@@ -66,7 +68,8 @@ type AuditEvent struct {
 
 // Repository provides persistence for auth entities.
 type Repository interface {
-	FindOrCreateUserByEmail(ctx context.Context, email string) (*User, error)
+	CreateUser(ctx context.Context, username, passwordHash string) (*User, error)
+	GetUserByUsername(ctx context.Context, username string) (*User, error)
 	GetUserByID(ctx context.Context, id string) (*User, error)
 	MarkUserDeleting(ctx context.Context, id string, gracePeriod time.Duration) error
 	ListUsersPastGracePeriod(ctx context.Context, now time.Time) ([]*User, error)
@@ -101,40 +104,14 @@ func NormalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
-func (r *PostgresRepository) FindOrCreateUserByEmail(ctx context.Context, email string) (*User, error) {
-	normalized := NormalizeEmail(email)
+const userColumns = `id, username, password_hash, email_normalized, status, deletion_requested_at, deletion_grace_period_ends_at, created_at, updated_at`
 
-	// Prefer an atomic insert-on-conflict select to avoid a race on user creation.
-	const insertSQL = `
-		INSERT INTO users (email_normalized)
-		VALUES ($1)
-		ON CONFLICT (email_normalized) DO NOTHING
-		RETURNING id, email_normalized, status, deletion_requested_at, deletion_grace_period_ends_at, created_at, updated_at
-	`
-	row := r.pool.QueryRow(ctx, insertSQL, normalized)
+func scanUser(row pgx.Row) (*User, error) {
 	var u User
 	if err := row.Scan(
 		&u.ID,
-		&u.EmailNormalized,
-		&u.Status,
-		&u.DeletionRequestedAt,
-		&u.DeletionGracePeriodEndsAt,
-		&u.CreatedAt,
-		&u.UpdatedAt,
-	); err == nil {
-		return &u, nil
-	} else if err != pgx.ErrNoRows {
-		return nil, fmt.Errorf("insert user: %w", err)
-	}
-
-	const selectSQL = `
-		SELECT id, email_normalized, status, deletion_requested_at, deletion_grace_period_ends_at, created_at, updated_at
-		FROM users
-		WHERE email_normalized = $1
-	`
-	row = r.pool.QueryRow(ctx, selectSQL, normalized)
-	if err := row.Scan(
-		&u.ID,
+		&u.Username,
+		&u.PasswordHash,
 		&u.EmailNormalized,
 		&u.Status,
 		&u.DeletionRequestedAt,
@@ -142,34 +119,49 @@ func (r *PostgresRepository) FindOrCreateUserByEmail(ctx context.Context, email 
 		&u.CreatedAt,
 		&u.UpdatedAt,
 	); err != nil {
-		return nil, fmt.Errorf("select user: %w", err)
+		return nil, err
 	}
 	return &u, nil
 }
 
+func (r *PostgresRepository) CreateUser(ctx context.Context, username, passwordHash string) (*User, error) {
+	const sql = `
+		INSERT INTO users (username, password_hash)
+		VALUES ($1, $2)
+		RETURNING ` + userColumns
+	return scanUser(r.pool.QueryRow(ctx, sql, username, passwordHash))
+}
+
+func (r *PostgresRepository) GetUserByUsername(ctx context.Context, username string) (*User, error) {
+	const sql = `
+		SELECT ` + userColumns + `
+		FROM users
+		WHERE username = $1
+	`
+	u, err := scanUser(r.pool.QueryRow(ctx, sql, username))
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select user by username: %w", err)
+	}
+	return u, nil
+}
+
 func (r *PostgresRepository) GetUserByID(ctx context.Context, id string) (*User, error) {
 	const sql = `
-		SELECT id, email_normalized, status, deletion_requested_at, deletion_grace_period_ends_at, created_at, updated_at
+		SELECT ` + userColumns + `
 		FROM users
 		WHERE id = $1
 	`
-	row := r.pool.QueryRow(ctx, sql, id)
-	var u User
-	if err := row.Scan(
-		&u.ID,
-		&u.EmailNormalized,
-		&u.Status,
-		&u.DeletionRequestedAt,
-		&u.DeletionGracePeriodEndsAt,
-		&u.CreatedAt,
-		&u.UpdatedAt,
-	); err != nil {
+	u, err := scanUser(r.pool.QueryRow(ctx, sql, id))
+	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("user not found")
 		}
 		return nil, fmt.Errorf("select user by id: %w", err)
 	}
-	return &u, nil
+	return u, nil
 }
 
 func (r *PostgresRepository) MarkUserDeleting(ctx context.Context, id string, gracePeriod time.Duration) error {
@@ -194,7 +186,7 @@ func (r *PostgresRepository) MarkUserDeleting(ctx context.Context, id string, gr
 
 func (r *PostgresRepository) ListUsersPastGracePeriod(ctx context.Context, now time.Time) ([]*User, error) {
 	const sql = `
-		SELECT id, email_normalized, status, deletion_requested_at, deletion_grace_period_ends_at, created_at, updated_at
+		SELECT ` + userColumns + `
 		FROM users
 		WHERE status = 'deleting' AND deletion_grace_period_ends_at IS NOT NULL AND deletion_grace_period_ends_at <= $1
 	`
@@ -206,19 +198,11 @@ func (r *PostgresRepository) ListUsersPastGracePeriod(ctx context.Context, now t
 
 	var out []*User
 	for rows.Next() {
-		var u User
-		if err := rows.Scan(
-			&u.ID,
-			&u.EmailNormalized,
-			&u.Status,
-			&u.DeletionRequestedAt,
-			&u.DeletionGracePeriodEndsAt,
-			&u.CreatedAt,
-			&u.UpdatedAt,
-		); err != nil {
+		u, err := scanUser(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
-		out = append(out, &u)
+		out = append(out, u)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate users past grace period: %w", err)
