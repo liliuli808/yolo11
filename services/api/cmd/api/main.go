@@ -70,7 +70,8 @@ func main() {
 	authRepo := auth.NewPostgresRepository(pool)
 	authMailer := auth.NewMailerFromConfig(cfg, logger)
 	authLimiter := auth.NewMemoryLimiter()
-	authService := auth.NewService(cfg, authRepo, authMailer, authLimiter)
+	turnstileVerifier := auth.NewCloudflareTurnstileVerifier(cfg)
+	authService := auth.NewService(cfg, authRepo, authMailer, authLimiter, turnstileVerifier)
 	authHandler := auth.NewHandler(authService, cfg)
 
 	identityRepo := identity.NewPostgresRepository(pool)
