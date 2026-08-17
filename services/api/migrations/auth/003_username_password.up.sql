@@ -1,6 +1,6 @@
-ALTER TABLE users ADD COLUMN username TEXT;
-ALTER TABLE users ADD COLUMN password_hash TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 
-CREATE UNIQUE INDEX idx_users_username ON users (username);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users (username);
 
 ALTER TABLE users ALTER COLUMN email_normalized DROP NOT NULL;
