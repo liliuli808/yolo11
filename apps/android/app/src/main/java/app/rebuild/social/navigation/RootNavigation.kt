@@ -51,7 +51,9 @@ fun RootNavigation(
                             popUpTo(Routes.Welcome.route) { inclusive = true }
                         }
                     },
-                    onGoToRegister = { navController.navigate(Routes.Register.route) },
+                    onGoToRegister = {
+                        navController.navigate(Routes.Register.route) { launchSingleTop = true }
+                    },
                     onBack = { navController.popBackStack() }
                 )
             }

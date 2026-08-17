@@ -38,6 +38,12 @@ class AuthViewModel @Inject constructor(
         submit({ apiClient.login(LoginRequest(username, password, turnstileToken)) }, onSuccess)
     }
 
+    fun clearError() {
+        if (_uiState.value is AuthUiState.Error) {
+            _uiState.value = AuthUiState.Idle
+        }
+    }
+
     private fun submit(block: suspend () -> Result<app.rebuild.social.core.network.AuthSession>, onSuccess: () -> Unit) {
         if (_uiState.value is AuthUiState.Loading) return
         _uiState.value = AuthUiState.Loading

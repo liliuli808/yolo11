@@ -14,8 +14,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -44,8 +46,16 @@ fun LoginScreen(
 ) {
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var turnstileEpoch by remember { mutableStateOf(0) }
     var turnstileToken by remember { mutableStateOf<String?>(null) }
     val uiState by viewModel.uiState.collectAsState()
+
+    LaunchedEffect(uiState) {
+        if (uiState is AuthUiState.Error) {
+            turnstileToken = null
+            turnstileEpoch++
+        }
+    }
 
     Scaffold(
         modifier = modifier.testTag("login-screen"),
@@ -65,26 +75,34 @@ fun LoginScreen(
             Spacer(modifier = Modifier.height(LanternSpacing.space5))
             LanternInput(
                 value = username,
-                onValueChange = { username = it },
+                onValueChange = {
+                    username = it
+                    if (uiState is AuthUiState.Error) viewModel.clearError()
+                },
                 label = "用户名",
                 placeholder = "请输入用户名"
             )
             Spacer(modifier = Modifier.height(LanternSpacing.space4))
             LanternInput(
                 value = password,
-                onValueChange = { password = it },
+                onValueChange = {
+                    password = it
+                    if (uiState is AuthUiState.Error) viewModel.clearError()
+                },
                 label = "密码",
                 placeholder = "请输入密码",
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
             )
             Spacer(modifier = Modifier.height(LanternSpacing.space5))
-            TurnstileWebView(
-                siteKey = BuildConfig.TURNSTILE_SITE_KEY,
-                onSuccess = { turnstileToken = it },
-                onError = { turnstileToken = null },
-                modifier = Modifier.fillMaxWidth()
-            )
+            key(turnstileEpoch) {
+                TurnstileWebView(
+                    siteKey = BuildConfig.TURNSTILE_SITE_KEY,
+                    onSuccess = { turnstileToken = it },
+                    onError = { turnstileToken = null },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
             if (uiState is AuthUiState.Error) {
                 Spacer(modifier = Modifier.height(LanternSpacing.space3))
                 Text(

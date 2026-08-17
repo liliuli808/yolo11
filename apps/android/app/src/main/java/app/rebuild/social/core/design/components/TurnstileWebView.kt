@@ -6,11 +6,13 @@ import android.os.Looper
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 
 /**
@@ -35,7 +37,7 @@ fun TurnstileWebView(
     }
 
     AndroidView(
-        modifier = modifier,
+        modifier = modifier.heightIn(min = 66.dp),
         factory = { context ->
             WebView(context).apply {
                 settings.javaScriptEnabled = true
