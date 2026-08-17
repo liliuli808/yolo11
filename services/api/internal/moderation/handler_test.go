@@ -155,7 +155,7 @@ func newTestConfig() *config.Config {
 		EmailFrom:       "noreply@example.com",
 		AccessTokenTTL:  15 * time.Minute,
 		RefreshTokenTTL: 7 * 24 * time.Hour,
-		StaffEmails:     []string{"staff@example.com"},
+		StaffUsernames:  []string{"admin"},
 	}
 }
 
@@ -177,7 +177,6 @@ type testFixtures struct {
 	idHandler         *identity.Handler
 	contentHandler    *content.Handler
 	moderationHandler *Handler
-	mailer            *recordingMailer
 }
 
 func setupHandlerTest(t *testing.T) *testFixtures {
@@ -187,7 +186,7 @@ func setupHandlerTest(t *testing.T) *testFixtures {
 	idRepo := identity.NewPostgresRepository(testDB)
 	mailer := &recordingMailer{}
 	authLimiter := auth.NewMemoryLimiter()
-	authSvc := auth.NewService(cfg, authRepo, mailer, authLimiter)
+	authSvc := auth.NewService(cfg, authRepo, mailer, authLimiter, &auth.StubTurnstile{})
 	idLimiter := auth.NewMemoryLimiter()
 	idSvc := identity.NewService(cfg, idRepo, authRepo, mailer, idLimiter, nil)
 	authHandler := auth.NewHandler(authSvc, cfg)
@@ -200,7 +199,7 @@ func setupHandlerTest(t *testing.T) *testFixtures {
 	contentSvc := content.NewService(cfg, contentRepo, idRepo, moderationSvc, contentLimiter)
 	contentHandler := content.NewHandler(contentSvc, idHandler, idSvc, cfg)
 	moderationHandler := NewHandler(moderationSvc, authHandler, idHandler, idSvc, cfg)
-	return &testFixtures{authHandler: authHandler, idHandler: idHandler, contentHandler: contentHandler, moderationHandler: moderationHandler, mailer: mailer}
+	return &testFixtures{authHandler: authHandler, idHandler: idHandler, contentHandler: contentHandler, moderationHandler: moderationHandler}
 }
 
 func mountModerationHandler(f *testFixtures) http.Handler {
@@ -214,40 +213,30 @@ func mountModerationHandler(f *testFixtures) http.Handler {
 	return r
 }
 
-func createSession(t *testing.T, serverURL string, mailer *recordingMailer, email string) string {
+func createSession(t *testing.T, serverURL string, username, password string) string {
 	t.Helper()
-	body, _ := json.Marshal(map[string]any{"email": email, "purpose": "login"})
-	req, _ := http.NewRequest(http.MethodPost, serverURL+"/v1/auth/email-codes", bytes.NewReader(body))
+	body, _ := json.Marshal(map[string]any{"username": username, "password": password, "turnstileToken": "tok"})
+	req, _ := http.NewRequest(http.MethodPost, serverURL+"/v1/auth/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", "session-code-key-"+email)
+	req.Header.Set("Idempotency-Key", "register-"+username)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("request code: %v", err)
+		t.Fatalf("register: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("expected no content from email code request, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
 	}
-
-	body2, _ := json.Marshal(map[string]string{"email": email, "code": mailer.LastCode()})
-	req2, _ := http.NewRequest(http.MethodPost, serverURL+"/v1/auth/email-sessions", bytes.NewReader(body2))
-	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("Idempotency-Key", "session-create-key-"+email)
-	resp2, err := client.Do(req2)
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusCreated {
-		t.Fatalf("expected created from session request, got %d", resp2.StatusCode)
-	}
-
 	var session map[string]any
-	if err := json.NewDecoder(resp2.Body).Decode(&session); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
 		t.Fatalf("decode session: %v", err)
 	}
-	return session["accessToken"].(string)
+	token, _ := session["accessToken"].(string)
+	if token == "" {
+		t.Fatal("missing access token")
+	}
+	return token
 }
 
 func createPersona(t *testing.T, serverURL, token, alias string) string {
@@ -332,9 +321,9 @@ func TestHandler_CreateAndListBlocks(t *testing.T) {
 	server := httptest.NewServer(mountModerationHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "block-user@example.com")
+	token := createSession(t, server.URL, "blockuser", "password123")
 	viewerPersonaID := createPersona(t, server.URL, token, "viewer")
-	targetToken := createSession(t, server.URL, f.mailer, "block-target@example.com")
+	targetToken := createSession(t, server.URL, "blocktarget", "password123")
 	targetPersonaID := createPersona(t, server.URL, targetToken, "target")
 
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -391,7 +380,7 @@ func TestHandler_BlockSelfIsRejected(t *testing.T) {
 	server := httptest.NewServer(mountModerationHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "block-self@example.com")
+	token := createSession(t, server.URL, "blockself", "password123")
 	personaID := createPersona(t, server.URL, token, "selfblocker")
 
 	body, _ := json.Marshal(map[string]any{"personaId": personaID})
@@ -415,12 +404,12 @@ func TestHandler_BlockHidesContentInFeed(t *testing.T) {
 	server := httptest.NewServer(mountModerationHandler(f))
 	defer server.Close()
 
-	posterToken := createSession(t, server.URL, f.mailer, "block-poster@example.com")
+	posterToken := createSession(t, server.URL, "blockposter", "password123")
 	posterPersonaID := createPersona(t, server.URL, posterToken, "blockedposter")
 	topicID := getTopicID(t, server.URL, "General")
 	createPublishedPost(t, server.URL, posterToken, posterPersonaID, topicID, "blocked post")
 
-	viewerToken := createSession(t, server.URL, f.mailer, "block-viewer@example.com")
+	viewerToken := createSession(t, server.URL, "blockviewer", "password123")
 	_ = createPersona(t, server.URL, viewerToken, "viewerfeed")
 
 	// Feed should include post before block.
@@ -475,10 +464,10 @@ func TestHandler_CreateAndGetReport(t *testing.T) {
 	server := httptest.NewServer(mountModerationHandler(f))
 	defer server.Close()
 
-	targetToken := createSession(t, server.URL, f.mailer, "report-target@example.com")
+	targetToken := createSession(t, server.URL, "reporttarget", "password123")
 	targetPersonaID := createPersona(t, server.URL, targetToken, "reporttarget")
 
-	reporterToken := createSession(t, server.URL, f.mailer, "reporter@example.com")
+	reporterToken := createSession(t, server.URL, "reporter", "password123")
 	_ = createPersona(t, server.URL, reporterToken, "reporter")
 
 	body, _ := json.Marshal(map[string]any{
@@ -529,13 +518,13 @@ func TestHandler_ModerationCaseLifecycle(t *testing.T) {
 	defer server.Close()
 
 	// Create a post to report.
-	posterToken := createSession(t, server.URL, f.mailer, "case-poster@example.com")
+	posterToken := createSession(t, server.URL, "caseposter", "password123")
 	posterPersonaID := createPersona(t, server.URL, posterToken, "caseposter")
 	topicID := getTopicID(t, server.URL, "General")
 	postID := createPublishedPost(t, server.URL, posterToken, posterPersonaID, topicID, "case post")
 
 	// Submit a report.
-	reporterToken := createSession(t, server.URL, f.mailer, "case-reporter@example.com")
+	reporterToken := createSession(t, server.URL, "casereporter", "password123")
 	_ = createPersona(t, server.URL, reporterToken, "casereporter")
 	reportBody, _ := json.Marshal(map[string]any{
 		"targetType": "post",
@@ -571,7 +560,7 @@ func TestHandler_ModerationCaseLifecycle(t *testing.T) {
 	}
 
 	// Staff login.
-	staffToken := createSession(t, server.URL, f.mailer, "staff@example.com")
+	staffToken := createSession(t, server.URL, "admin", "password123")
 	caseBody, _ := json.Marshal(map[string]any{
 		"targetType": "post",
 		"targetId":   postID,
@@ -663,7 +652,7 @@ func TestHandler_StaffOnlyEndpointsRejectNonStaff(t *testing.T) {
 	server := httptest.NewServer(mountModerationHandler(f))
 	defer server.Close()
 
-	userToken := createSession(t, server.URL, f.mailer, "non-staff@example.com")
+	userToken := createSession(t, server.URL, "nonstaff", "password123")
 	client := &http.Client{Timeout: 5 * time.Second}
 	req, _ := http.NewRequest(http.MethodGet, server.URL+"/v1/moderation/cases", nil)
 	req.Header.Set("Authorization", "Bearer "+userToken)

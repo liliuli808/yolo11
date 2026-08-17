@@ -159,9 +159,32 @@ func newTestService() (*Service, *recordingMailer) {
 func createUser(t *testing.T, email string) *auth.User {
 	t.Helper()
 	ctx := context.Background()
-	u, err := auth.NewPostgresRepository(testDB).FindOrCreateUserByEmail(ctx, email)
+	username := deriveUsername(email)
+	u, err := auth.NewPostgresRepository(testDB).CreateUser(ctx, username, "hash")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
+	}
+	if _, err := testDB.Exec(ctx, "UPDATE users SET email_normalized = $2 WHERE id = $1", u.ID, email); err != nil {
+		t.Fatalf("set user email: %v", err)
+	}
+	return u
+}
+
+func deriveUsername(email string) string {
+	local := strings.Split(email, "@")[0]
+	var b strings.Builder
+	for _, r := range strings.ToLower(local) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	u := strings.TrimLeft(b.String(), "0123456789")
+	u = strings.TrimLeft(u, "_")
+	if len(u) > 20 {
+		u = u[:20]
+	}
+	if u == "" {
+		return "user"
 	}
 	return u
 }
@@ -600,12 +623,12 @@ func TestService_AccountDeletionHook_ArchivesPersonas(t *testing.T) {
 	idRepo := NewPostgresRepository(testDB)
 	mailer := &recordingMailer{}
 	authLimiter := auth.NewMemoryLimiter()
-	authSvc := auth.NewService(cfg, authRepo, mailer, authLimiter)
+	authSvc := auth.NewService(cfg, authRepo, mailer, authLimiter, &auth.StubTurnstile{})
 	idSvc := NewService(cfg, idRepo, authRepo, mailer, auth.NewMemoryLimiter(), nil)
 	authSvc.IdentityCleanup = idSvc.CleanupOnAccountDeletion
 	ctx := context.Background()
 
-	u, err := authRepo.FindOrCreateUserByEmail(ctx, "hook@example.com")
+	u, err := authRepo.CreateUser(ctx, "hookuser", "hash")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}

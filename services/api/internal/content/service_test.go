@@ -3,6 +3,7 @@ package content
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +11,25 @@ import (
 	"github.com/yiguan/api/internal/identity"
 	"github.com/yiguan/api/internal/platform/config"
 )
+
+func deriveUsername(email string) string {
+	local := strings.Split(email, "@")[0]
+	var b strings.Builder
+	for _, r := range strings.ToLower(local) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	u := strings.TrimLeft(b.String(), "0123456789")
+	u = strings.TrimLeft(u, "_")
+	if len(u) > 20 {
+		u = u[:20]
+	}
+	if u == "" {
+		return "user"
+	}
+	return u
+}
 
 func newContentTestService() *Service {
 	cfg := &config.Config{
@@ -27,9 +47,13 @@ func newContentTestService() *Service {
 func createUser(t *testing.T, email string) *auth.User {
 	t.Helper()
 	ctx := context.Background()
-	u, err := auth.NewPostgresRepository(testDB).FindOrCreateUserByEmail(ctx, email)
+	username := deriveUsername(email)
+	u, err := auth.NewPostgresRepository(testDB).CreateUser(ctx, username, "hash")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
+	}
+	if _, err := testDB.Exec(ctx, "UPDATE users SET email_normalized = $2 WHERE id = $1", u.ID, email); err != nil {
+		t.Fatalf("set user email: %v", err)
 	}
 	return u
 }

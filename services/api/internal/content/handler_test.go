@@ -169,7 +169,6 @@ type testFixtures struct {
 	authHandler    *auth.Handler
 	idHandler      *identity.Handler
 	contentHandler *Handler
-	mailer         *recordingMailer
 }
 
 func setupHandlerTest(t *testing.T) *testFixtures {
@@ -179,7 +178,7 @@ func setupHandlerTest(t *testing.T) *testFixtures {
 	idRepo := identity.NewPostgresRepository(testDB)
 	mailer := &recordingMailer{}
 	authLimiter := auth.NewMemoryLimiter()
-	authSvc := auth.NewService(cfg, authRepo, mailer, authLimiter)
+	authSvc := auth.NewService(cfg, authRepo, mailer, authLimiter, &auth.StubTurnstile{})
 	idLimiter := auth.NewMemoryLimiter()
 	idSvc := identity.NewService(cfg, idRepo, authRepo, mailer, idLimiter, nil)
 	authHandler := auth.NewHandler(authSvc, cfg)
@@ -188,7 +187,7 @@ func setupHandlerTest(t *testing.T) *testFixtures {
 	contentLimiter := auth.NewMemoryLimiter()
 	contentSvc := NewService(cfg, contentRepo, idRepo, nil, contentLimiter)
 	contentHandler := NewHandler(contentSvc, idHandler, idSvc, cfg)
-	return &testFixtures{authHandler: authHandler, idHandler: idHandler, contentHandler: contentHandler, mailer: mailer}
+	return &testFixtures{authHandler: authHandler, idHandler: idHandler, contentHandler: contentHandler}
 }
 
 func mountContentHandler(f *testFixtures) http.Handler {
@@ -201,40 +200,30 @@ func mountContentHandler(f *testFixtures) http.Handler {
 	return r
 }
 
-func createSession(t *testing.T, serverURL string, mailer *recordingMailer, email string) string {
+func createSession(t *testing.T, serverURL string, username, password string) string {
 	t.Helper()
-	body, _ := json.Marshal(map[string]any{"email": email, "purpose": "login"})
-	req, _ := http.NewRequest(http.MethodPost, serverURL+"/v1/auth/email-codes", bytes.NewReader(body))
+	body, _ := json.Marshal(map[string]any{"username": username, "password": password, "turnstileToken": "tok"})
+	req, _ := http.NewRequest(http.MethodPost, serverURL+"/v1/auth/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", "session-code-key-"+email)
+	req.Header.Set("Idempotency-Key", "register-"+username)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("request code: %v", err)
+		t.Fatalf("register: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("expected no content from email code request, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
 	}
-
-	body2, _ := json.Marshal(map[string]string{"email": email, "code": mailer.LastCode()})
-	req2, _ := http.NewRequest(http.MethodPost, serverURL+"/v1/auth/email-sessions", bytes.NewReader(body2))
-	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("Idempotency-Key", "session-create-key-"+email)
-	resp2, err := client.Do(req2)
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusCreated {
-		t.Fatalf("expected created from session request, got %d", resp2.StatusCode)
-	}
-
 	var session map[string]any
-	if err := json.NewDecoder(resp2.Body).Decode(&session); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
 		t.Fatalf("decode session: %v", err)
 	}
-	return session["accessToken"].(string)
+	token, _ := session["accessToken"].(string)
+	if token == "" {
+		t.Fatal("missing access token")
+	}
+	return token
 }
 
 func createPersona(t *testing.T, serverURL, token, alias string) string {
@@ -318,7 +307,7 @@ func TestHandler_CreatePost(t *testing.T) {
 	server := httptest.NewServer(mountContentHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "content-create-post@example.com")
+	token := createSession(t, server.URL, "contentcreatepost", "password123")
 	_ = createPersona(t, server.URL, token, "contentposter")
 	topicID := getTopicID(t, server.URL, "General")
 
@@ -360,7 +349,7 @@ func TestHandler_CreatePost_RequiresDefaultPersona(t *testing.T) {
 	server := httptest.NewServer(mountContentHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "content-no-persona@example.com")
+	token := createSession(t, server.URL, "contentnopersona", "password123")
 	topicID := getTopicID(t, server.URL, "General")
 
 	body, _ := json.Marshal(map[string]any{"topicId": topicID, "content": "hello world"})
@@ -391,7 +380,7 @@ func TestHandler_FollowAndUnfollowTopic(t *testing.T) {
 	server := httptest.NewServer(mountContentHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "content-follow@example.com")
+	token := createSession(t, server.URL, "contentfollow", "password123")
 	_ = createPersona(t, server.URL, token, "follower")
 	topicID := getTopicID(t, server.URL, "General")
 
@@ -438,7 +427,7 @@ func TestHandler_ListTopicPosts(t *testing.T) {
 	server := httptest.NewServer(mountContentHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "content-topic-posts@example.com")
+	token := createSession(t, server.URL, "contenttopicposts", "password123")
 	_ = createPersona(t, server.URL, token, "topicposter")
 	topicID := getTopicID(t, server.URL, "Reflection")
 
@@ -485,7 +474,7 @@ func TestHandler_UpdatePost(t *testing.T) {
 	server := httptest.NewServer(mountContentHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "content-update-post@example.com")
+	token := createSession(t, server.URL, "contentupdatepost", "password123")
 	_ = createPersona(t, server.URL, token, "updateposter")
 	topicID := getTopicID(t, server.URL, "General")
 
@@ -533,7 +522,7 @@ func TestHandler_CreateComment(t *testing.T) {
 	server := httptest.NewServer(mountContentHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "content-comment@example.com")
+	token := createSession(t, server.URL, "contentcomment", "password123")
 	_ = createPersona(t, server.URL, token, "commenter")
 	topicID := getTopicID(t, server.URL, "General")
 
@@ -581,7 +570,7 @@ func TestHandler_CreateReaction(t *testing.T) {
 	server := httptest.NewServer(mountContentHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "content-reaction@example.com")
+	token := createSession(t, server.URL, "contentreaction", "password123")
 	_ = createPersona(t, server.URL, token, "reactor")
 	topicID := getTopicID(t, server.URL, "General")
 
@@ -630,7 +619,7 @@ func TestHandler_UploadMedia(t *testing.T) {
 	server := httptest.NewServer(mountContentHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "content-media@example.com")
+	token := createSession(t, server.URL, "contentmedia", "password123")
 	_ = createPersona(t, server.URL, token, "mediauploader")
 
 	body, _ := json.Marshal(map[string]any{
@@ -671,7 +660,7 @@ func TestHandler_CreatePost_Idempotent(t *testing.T) {
 	server := httptest.NewServer(mountContentHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "content-idempotent@example.com")
+	token := createSession(t, server.URL, "contentidempotent", "password123")
 	_ = createPersona(t, server.URL, token, "idempotentposter")
 	topicID := getTopicID(t, server.URL, "General")
 
@@ -736,7 +725,7 @@ func TestHandler_PostLifecycle(t *testing.T) {
 	server := httptest.NewServer(mountContentHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "content-lifecycle@example.com")
+	token := createSession(t, server.URL, "contentlifecycle", "password123")
 	_ = createPersona(t, server.URL, token, "lifecycleposter")
 	topicID := getTopicID(t, server.URL, "General")
 
@@ -822,7 +811,7 @@ func TestHandler_OptionalAuth_PopulatesViewerFields(t *testing.T) {
 	server := httptest.NewServer(mountContentHandler(f))
 	defer server.Close()
 
-	posterToken := createSession(t, server.URL, f.mailer, "content-viewer-poster@example.com")
+	posterToken := createSession(t, server.URL, "contentviewerposter", "password123")
 	posterPersonaID := createPersona(t, server.URL, posterToken, "viewerposter")
 	topicID := getTopicID(t, server.URL, "General")
 
@@ -844,7 +833,7 @@ func TestHandler_OptionalAuth_PopulatesViewerFields(t *testing.T) {
 	postID := created["id"].(string)
 	publishPost(t, postID)
 
-	viewerToken := createSession(t, server.URL, f.mailer, "content-viewer@example.com")
+	viewerToken := createSession(t, server.URL, "contentviewer", "password123")
 	viewerPersonaID := createPersona(t, server.URL, viewerToken, "viewerpersona")
 
 	// React and save the post as the viewer.
@@ -931,7 +920,7 @@ func TestHandler_FeedExcludesNonPublished(t *testing.T) {
 	server := httptest.NewServer(mountContentHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "content-feed-exclude@example.com")
+	token := createSession(t, server.URL, "contentfeedexclude", "password123")
 	_ = createPersona(t, server.URL, token, "feedposter")
 	topicID := getTopicID(t, server.URL, "General")
 
@@ -970,7 +959,7 @@ func TestHandler_AuthorSeesOwnNonPublishedPosts(t *testing.T) {
 	server := httptest.NewServer(mountContentHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "content-author-states@example.com")
+	token := createSession(t, server.URL, "contentauthorstates", "password123")
 	personaID := createPersona(t, server.URL, token, "stateposter")
 	topicID := getTopicID(t, server.URL, "General")
 
@@ -1037,7 +1026,7 @@ func TestHandler_PublicPersonaPosts(t *testing.T) {
 	server := httptest.NewServer(mountContentHandler(f))
 	defer server.Close()
 
-	token := createSession(t, server.URL, f.mailer, "content-persona-posts@example.com")
+	token := createSession(t, server.URL, "contentpersonaposts", "password123")
 	personaID := createPersona(t, server.URL, token, "publicposter")
 	topicID := getTopicID(t, server.URL, "Creative")
 

@@ -19,7 +19,7 @@ func setupHandlerTest(t *testing.T) (*Handler, *auth.Handler, *recordingMailer) 
 	idRepo := NewPostgresRepository(testDB)
 	mailer := &recordingMailer{}
 	authLimiter := auth.NewMemoryLimiter()
-	authSvc := auth.NewService(cfg, authRepo, mailer, authLimiter)
+	authSvc := auth.NewService(cfg, authRepo, mailer, authLimiter, &auth.StubTurnstile{})
 	idLimiter := auth.NewMemoryLimiter()
 	idSvc := NewService(cfg, idRepo, authRepo, mailer, idLimiter, nil)
 	authHandler := auth.NewHandler(authSvc, cfg)
@@ -36,48 +36,38 @@ func mountIdentityHandler(h *Handler, authHandler *auth.Handler) http.Handler {
 	return r
 }
 
-func createSession(t *testing.T, serverURL string, mailer *recordingMailer, email string) string {
+func createSession(t *testing.T, serverURL string, username, password string) string {
 	t.Helper()
-	body, _ := json.Marshal(map[string]any{"email": email, "purpose": "login"})
-	req, _ := http.NewRequest(http.MethodPost, serverURL+"/v1/auth/email-codes", bytes.NewReader(body))
+	body, _ := json.Marshal(map[string]any{"username": username, "password": password, "turnstileToken": "tok"})
+	req, _ := http.NewRequest(http.MethodPost, serverURL+"/v1/auth/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", "session-code-key-"+email)
+	req.Header.Set("Idempotency-Key", "register-"+username)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("request code: %v", err)
+		t.Fatalf("register: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("expected no content from email code request, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", resp.StatusCode)
 	}
-
-	body2, _ := json.Marshal(map[string]string{"email": email, "code": mailer.LastCode()})
-	req2, _ := http.NewRequest(http.MethodPost, serverURL+"/v1/auth/email-sessions", bytes.NewReader(body2))
-	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("Idempotency-Key", "session-create-key-"+email)
-	resp2, err := client.Do(req2)
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusCreated {
-		t.Fatalf("expected created from session request, got %d", resp2.StatusCode)
-	}
-
 	var session map[string]any
-	if err := json.NewDecoder(resp2.Body).Decode(&session); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
 		t.Fatalf("decode session: %v", err)
 	}
-	return session["accessToken"].(string)
+	token, _ := session["accessToken"].(string)
+	if token == "" {
+		t.Fatal("missing access token")
+	}
+	return token
 }
 
 func TestHandler_GetMe(t *testing.T) {
-	h, authHandler, mailer := setupHandlerTest(t)
+	h, authHandler, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountIdentityHandler(h, authHandler))
 	defer server.Close()
 
-	token := createSession(t, server.URL, mailer, "handler-me@example.com")
+	token := createSession(t, server.URL, "handlerme", "password123")
 
 	req, _ := http.NewRequest(http.MethodGet, server.URL+"/v1/me", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -124,11 +114,11 @@ func TestHandler_GetMe_Unauthorized(t *testing.T) {
 }
 
 func TestHandler_CreateAndListPersona(t *testing.T) {
-	h, authHandler, mailer := setupHandlerTest(t)
+	h, authHandler, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountIdentityHandler(h, authHandler))
 	defer server.Close()
 
-	token := createSession(t, server.URL, mailer, "handler-persona@example.com")
+	token := createSession(t, server.URL, "handlerpersona", "password123")
 
 	body, _ := json.Marshal(map[string]any{"alias": "handlertest"})
 	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/me/personas", bytes.NewReader(body))
@@ -177,11 +167,11 @@ func TestHandler_CreateAndListPersona(t *testing.T) {
 }
 
 func TestHandler_CreatePersona_MissingIdempotencyKey(t *testing.T) {
-	h, authHandler, mailer := setupHandlerTest(t)
+	h, authHandler, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountIdentityHandler(h, authHandler))
 	defer server.Close()
 
-	token := createSession(t, server.URL, mailer, "handler-idemp@example.com")
+	token := createSession(t, server.URL, "handleridemp", "password123")
 
 	body, _ := json.Marshal(map[string]any{"alias": "missingkey"})
 	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/me/personas", bytes.NewReader(body))
@@ -208,11 +198,11 @@ func TestHandler_CreatePersona_MissingIdempotencyKey(t *testing.T) {
 }
 
 func TestHandler_PublicPersona_NoRealProfileLeak(t *testing.T) {
-	h, authHandler, mailer := setupHandlerTest(t)
+	h, authHandler, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountIdentityHandler(h, authHandler))
 	defer server.Close()
 
-	token := createSession(t, server.URL, mailer, "handler-public@example.com")
+	token := createSession(t, server.URL, "handlerpublic", "password123")
 	body, _ := json.Marshal(map[string]any{"alias": "publictest"})
 	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/me/personas", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -257,11 +247,11 @@ func TestHandler_PublicPersona_NoRealProfileLeak(t *testing.T) {
 }
 
 func TestHandler_PublicPersonaPosts_Empty(t *testing.T) {
-	h, authHandler, mailer := setupHandlerTest(t)
+	h, authHandler, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountIdentityHandler(h, authHandler))
 	defer server.Close()
 
-	token := createSession(t, server.URL, mailer, "handler-posts@example.com")
+	token := createSession(t, server.URL, "handlerposts", "password123")
 	body, _ := json.Marshal(map[string]any{"alias": "poststest"})
 	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/me/personas", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -305,11 +295,11 @@ func TestHandler_PublicPersonaPosts_Empty(t *testing.T) {
 }
 
 func TestHandler_PublicPersonaPosts_Pagination(t *testing.T) {
-	h, authHandler, mailer := setupHandlerTest(t)
+	h, authHandler, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountIdentityHandler(h, authHandler))
 	defer server.Close()
 
-	token := createSession(t, server.URL, mailer, "handler-posts-page@example.com")
+	token := createSession(t, server.URL, "handlerpostspage", "password123")
 	body, _ := json.Marshal(map[string]any{"alias": "pagetest"})
 	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/me/personas", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -359,11 +349,11 @@ func TestHandler_PublicPersonaPosts_Pagination(t *testing.T) {
 }
 
 func TestHandler_ArchivePersona(t *testing.T) {
-	h, authHandler, mailer := setupHandlerTest(t)
+	h, authHandler, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountIdentityHandler(h, authHandler))
 	defer server.Close()
 
-	token := createSession(t, server.URL, mailer, "handler-archive@example.com")
+	token := createSession(t, server.URL, "handlerarchive", "password123")
 	body, _ := json.Marshal(map[string]any{"alias": "archivetest"})
 	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/me/personas", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -407,11 +397,11 @@ func TestHandler_ArchivePersona(t *testing.T) {
 }
 
 func TestHandler_SetDefaultPersona(t *testing.T) {
-	h, authHandler, mailer := setupHandlerTest(t)
+	h, authHandler, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountIdentityHandler(h, authHandler))
 	defer server.Close()
 
-	token := createSession(t, server.URL, mailer, "handler-default@example.com")
+	token := createSession(t, server.URL, "handlerdefault", "password123")
 	client := &http.Client{Timeout: 5 * time.Second}
 
 	create := func(alias, key string) string {
@@ -477,7 +467,7 @@ func TestHandler_SetDefaultPersona(t *testing.T) {
 }
 
 func TestHandler_ActivePersonaMiddleware_RequiresDefaultPersona(t *testing.T) {
-	h, authHandler, mailer := setupHandlerTest(t)
+	h, authHandler, _ := setupHandlerTest(t)
 	r := chi.NewRouter()
 	r.Route("/v1", func(v1 chi.Router) {
 		authHandler.Mount(v1)
@@ -489,7 +479,7 @@ func TestHandler_ActivePersonaMiddleware_RequiresDefaultPersona(t *testing.T) {
 	server := httptest.NewServer(r)
 	defer server.Close()
 
-	token := createSession(t, server.URL, mailer, "handler-active-persona@example.com")
+	token := createSession(t, server.URL, "handleractivepersona", "password123")
 
 	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/test-active-persona", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
