@@ -125,7 +125,7 @@ func (r *PostgresRepository) GetRealProfileByID(ctx context.Context, id string) 
 	const sql = `
 		SELECT
 			u.id,
-			u.email_normalized,
+			COALESCE(u.email_normalized, '') AS email_normalized,
 			u.status,
 			u.created_at,
 			u.updated_at,

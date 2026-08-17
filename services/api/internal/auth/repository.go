@@ -104,7 +104,7 @@ func NormalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
-const userColumns = `id, username, password_hash, email_normalized, status, deletion_requested_at, deletion_grace_period_ends_at, created_at, updated_at`
+const userColumns = `id, COALESCE(username, '') AS username, COALESCE(password_hash, '') AS password_hash, COALESCE(email_normalized, '') AS email_normalized, status, deletion_requested_at, deletion_grace_period_ends_at, created_at, updated_at`
 
 func scanUser(row pgx.Row) (*User, error) {
 	var u User
@@ -129,7 +129,11 @@ func (r *PostgresRepository) CreateUser(ctx context.Context, username, passwordH
 		INSERT INTO users (username, password_hash)
 		VALUES ($1, $2)
 		RETURNING ` + userColumns
-	return scanUser(r.pool.QueryRow(ctx, sql, username, passwordHash))
+	u, err := scanUser(r.pool.QueryRow(ctx, sql, username, passwordHash))
+	if err != nil {
+		return nil, fmt.Errorf("insert user: %w", err)
+	}
+	return u, nil
 }
 
 func (r *PostgresRepository) GetUserByUsername(ctx context.Context, username string) (*User, error) {
