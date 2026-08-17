@@ -30,6 +30,11 @@ var (
 	ErrUserNotFound           = errors.New("user not found")
 	ErrDeletionAlreadyPending = errors.New("account deletion already pending")
 	ErrDeletionInvalidCode    = errors.New("invalid deletion verification code")
+	ErrUsernameTaken          = errors.New("username already taken")
+	ErrInvalidCredentials     = errors.New("invalid username or password")
+	ErrCaptchaFailed          = errors.New("captcha verification failed")
+	ErrInvalidUsername        = errors.New("invalid username")
+	ErrInvalidPassword        = errors.New("invalid password")
 )
 
 // RateLimitError carries the retry window for a rate-limited request.
