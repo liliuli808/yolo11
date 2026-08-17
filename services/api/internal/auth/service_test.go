@@ -235,8 +235,8 @@ func TestVerifyPasswordForDeletion(t *testing.T) {
 	if err := svc.VerifyPasswordForDeletion(ctx, tokens.UserID, "password123"); err != nil {
 		t.Fatalf("expected nil for correct password, got %v", err)
 	}
-	if err := svc.VerifyPasswordForDeletion(ctx, tokens.UserID, "wrongpass"); err == nil {
-		t.Fatal("expected error for wrong password")
+	if err := svc.VerifyPasswordForDeletion(ctx, tokens.UserID, "wrongpass"); !errors.Is(err, ErrDeletionInvalidPassword) {
+		t.Fatalf("expected ErrDeletionInvalidPassword, got %v", err)
 	}
 }
 

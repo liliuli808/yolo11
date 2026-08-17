@@ -394,7 +394,10 @@ func TestHandler_RateLimited_ReturnsContractCode(t *testing.T) {
 	// four return ErrUsernameTaken but still consume a username-bucket slot.
 	for i := 0; i < 5; i++ {
 		_, err := h.service.Register(ctx, "ratelimited", "password123", "tok", "127.0.0.1", "fp1", "ua")
-		if err == nil {
+		if i == 0 {
+			if err != nil {
+				t.Fatalf("first register: expected success, got %v", err)
+			}
 			continue
 		}
 		if !errors.Is(err, ErrUsernameTaken) {
