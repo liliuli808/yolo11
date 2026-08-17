@@ -12,8 +12,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import app.rebuild.social.core.design.components.LoadingIndicator
-import app.rebuild.social.feature.auth.EmailSignInScreen
-import app.rebuild.social.feature.auth.VerificationScreen
+import app.rebuild.social.feature.auth.LoginScreen
+import app.rebuild.social.feature.auth.RegisterScreen
 import app.rebuild.social.feature.chat.ChatScreen
 import app.rebuild.social.feature.feed.FeedScreen
 import app.rebuild.social.feature.feed.PostDetailScreen
@@ -41,22 +41,28 @@ fun RootNavigation(
         ) {
             composable(Routes.Welcome.route) {
                 WelcomeScreen(
-                    onGetStarted = { navController.navigate(Routes.EmailSignIn.route) }
+                    onGetStarted = { navController.navigate(Routes.Login.route) }
                 )
             }
-            composable(Routes.EmailSignIn.route) {
-                EmailSignInScreen(
-                    onSignInSubmitted = { navController.navigate(Routes.Verification.route) },
-                    onBack = { navController.popBackStack() }
-                )
-            }
-            composable(Routes.Verification.route) {
-                VerificationScreen(
-                    onVerified = {
+            composable(Routes.Login.route) {
+                LoginScreen(
+                    onSignInSubmitted = {
                         navController.navigate(Routes.Feed.route) {
                             popUpTo(Routes.Welcome.route) { inclusive = true }
                         }
                     },
+                    onGoToRegister = { navController.navigate(Routes.Register.route) },
+                    onBack = { navController.popBackStack() }
+                )
+            }
+            composable(Routes.Register.route) {
+                RegisterScreen(
+                    onRegistered = {
+                        navController.navigate(Routes.Feed.route) {
+                            popUpTo(Routes.Welcome.route) { inclusive = true }
+                        }
+                    },
+                    onGoToLogin = { navController.popBackStack() },
                     onBack = { navController.popBackStack() }
                 )
             }
