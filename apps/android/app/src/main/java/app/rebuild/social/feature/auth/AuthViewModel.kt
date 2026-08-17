@@ -39,6 +39,7 @@ class AuthViewModel @Inject constructor(
     }
 
     private fun submit(block: suspend () -> Result<app.rebuild.social.core.network.AuthSession>, onSuccess: () -> Unit) {
+        if (_uiState.value is AuthUiState.Loading) return
         _uiState.value = AuthUiState.Loading
         viewModelScope.launch {
             block().onSuccess { session ->

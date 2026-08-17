@@ -1,7 +1,9 @@
 package app.rebuild.social.core.network
 
+import kotlinx.serialization.SerialName
 import retrofit2.Response
 import retrofit2.http.Body
+import retrofit2.http.Header
 import retrofit2.http.POST
 
 /**
@@ -15,27 +17,27 @@ interface ApiClient {
 
 @kotlinx.serialization.Serializable
 data class RegisterRequest(
-    val username: String,
-    val password: String,
-    val turnstileToken: String
+    @SerialName("username") val username: String,
+    @SerialName("password") val password: String,
+    @SerialName("turnstileToken") val turnstileToken: String
 )
 
 @kotlinx.serialization.Serializable
 data class LoginRequest(
-    val username: String,
-    val password: String,
-    val turnstileToken: String
+    @SerialName("username") val username: String,
+    @SerialName("password") val password: String,
+    @SerialName("turnstileToken") val turnstileToken: String
 )
 
 @kotlinx.serialization.Serializable
 data class AuthSession(
-    val accessToken: String,
-    val refreshToken: String,
-    val tokenType: String,
-    val expiresIn: Int,
-    val userId: String,
-    val personaId: String? = null,
-    val isStaff: Boolean = false
+    @SerialName("accessToken") val accessToken: String,
+    @SerialName("refreshToken") val refreshToken: String,
+    @SerialName("tokenType") val tokenType: String,
+    @SerialName("expiresIn") val expiresIn: Int,
+    @SerialName("userId") val userId: String,
+    @SerialName("personaId") val personaId: String? = null,
+    @SerialName("isStaff") val isStaff: Boolean = false
 )
 
 /**
@@ -44,8 +46,14 @@ data class AuthSession(
  */
 interface LanternApiService {
     @POST("v1/auth/register")
-    suspend fun register(@Body request: RegisterRequest): Response<AuthSession>
+    suspend fun register(
+        @Header("Idempotency-Key") idempotencyKey: String,
+        @Body request: RegisterRequest
+    ): Response<AuthSession>
 
     @POST("v1/auth/login")
-    suspend fun login(@Body request: LoginRequest): Response<AuthSession>
+    suspend fun login(
+        @Header("Idempotency-Key") idempotencyKey: String,
+        @Body request: LoginRequest
+    ): Response<AuthSession>
 }

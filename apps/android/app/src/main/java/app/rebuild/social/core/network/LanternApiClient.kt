@@ -1,5 +1,6 @@
 package app.rebuild.social.core.network
 
+import java.util.UUID
 import javax.inject.Inject
 
 class LanternApiClient @Inject constructor(
@@ -7,11 +8,11 @@ class LanternApiClient @Inject constructor(
 ) : ApiClient {
 
     override suspend fun register(request: RegisterRequest): Result<AuthSession> {
-        return runApiCall { service.register(request) }
+        return runApiCall { service.register(UUID.randomUUID().toString(), request) }
     }
 
     override suspend fun login(request: LoginRequest): Result<AuthSession> {
-        return runApiCall { service.login(request) }
+        return runApiCall { service.login(UUID.randomUUID().toString(), request) }
     }
 
     private suspend fun <T : Any> runApiCall(call: suspend () -> retrofit2.Response<T>): Result<T> {

@@ -1,11 +1,15 @@
 package app.rebuild.social.core.design.components
 
 import android.annotation.SuppressLint
+import android.os.Handler
+import android.os.Looper
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 
@@ -21,7 +25,14 @@ fun TurnstileWebView(
     onError: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val bridge = remember { TurnstileJsBridge(onSuccess, onError) }
+    val currentOnSuccess by rememberUpdatedState(onSuccess)
+    val currentOnError by rememberUpdatedState(onError)
+    val bridge = remember {
+        TurnstileJsBridge(
+            onSuccessCallback = { currentOnSuccess(it) },
+            onErrorCallback = { currentOnError(it) }
+        )
+    }
 
     AndroidView(
         modifier = modifier,
@@ -33,14 +44,15 @@ fun TurnstileWebView(
                 addJavascriptInterface(bridge, "LanternTurnstile")
                 webViewClient = WebViewClient()
                 loadDataWithBaseURL(
-                    null,
+                    "https://localhost/",
                     turnstileHtml(siteKey),
                     "text/html",
                     "utf-8",
                     null
                 )
             }
-        }
+        },
+        onRelease = { it.destroy() }
     )
 }
 
@@ -48,11 +60,17 @@ private class TurnstileJsBridge(
     private val onSuccessCallback: (String) -> Unit,
     private val onErrorCallback: (String) -> Unit
 ) {
-    @JavascriptInterface
-    fun onSuccess(token: String) = onSuccessCallback(token)
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     @JavascriptInterface
-    fun onError(message: String) = onErrorCallback(message)
+    fun onSuccess(token: String) {
+        mainHandler.post { onSuccessCallback(token) }
+    }
+
+    @JavascriptInterface
+    fun onError(message: String) {
+        mainHandler.post { onErrorCallback(message) }
+    }
 }
 
 private fun turnstileHtml(siteKey: String): String = """
