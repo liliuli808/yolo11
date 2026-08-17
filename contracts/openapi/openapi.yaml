@@ -79,49 +79,61 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
-  /v1/auth/email-codes:
+  /v1/auth/register:
     post:
-      operationId: sendEmailCode
-      summary: Request an email verification code
+      operationId: register
+      summary: Create an account with username and password
       description: |
-        Sends a one-time verification code to the supplied email address. The code is
-        used to create or resume a session. Rate-limited per email address.
+        Creates a user and returns an access/refresh token pair. Requires a
+        Cloudflare Turnstile token.
       security: []
       tags:
         - Auth
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/EmailCodeRequest"
-      responses:
-        "204":
-          description: Verification code sent.
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "422":
-          $ref: "#/components/responses/UnprocessableEntity"
-        "429":
-          $ref: "#/components/responses/RateLimited"
-  /v1/auth/email-sessions:
-    post:
-      operationId: createEmailSession
-      summary: Exchange a verification code for a session
-      description: |
-        Verifies the code and returns an access/refresh token pair. Creates a new real
-        profile if the email has never been used.
-      security: []
-      tags:
-        - Auth
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/EmailSessionRequest"
+              $ref: "#/components/schemas/RegisterRequest"
       responses:
         "201":
+          description: Account created and session started.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          description: Username already taken.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/auth/login:
+    post:
+      operationId: login
+      summary: Sign in with username and password
+      description: |
+        Verifies the credentials and returns an access/refresh token pair.
+        Requires a Cloudflare Turnstile token.
+      security: []
+      tags:
+        - Auth
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
           description: Session created.
           content:
             application/json:
@@ -194,9 +206,8 @@ paths:
       operationId: deleteMe
       summary: Request account deletion
       description: |
-        Starts the 30-day account deletion grace period. Requires a verification code
-        sent to the real profile email. Within the grace period, logging in cancels the
-        deletion.
+        Starts the 30-day account deletion grace period. Requires the account password.
+        Within the grace period, logging in cancels the deletion.
       tags:
         - Identity
       parameters:
@@ -1534,7 +1545,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: Bearer access token returned by `POST /v1/auth/email-sessions` or `POST /v1/auth/refresh`.
+      description: Bearer access token returned by `POST /v1/auth/login` or `POST /v1/auth/register`.
   parameters:
     Cursor:
       name: cursor
@@ -1728,6 +1739,7 @@ components:
         - refreshToken
         - tokenType
         - expiresIn
+        - userId
         - personaId
       properties:
         accessToken:
@@ -1741,6 +1753,9 @@ components:
         expiresIn:
           type: integer
           description: Access token lifetime in seconds.
+        userId:
+          type: string
+          format: uuid
         personaId:
           type: string
           format: uuid
@@ -2422,36 +2437,42 @@ components:
         notes:
           type: string
           maxLength: 4000
-    EmailCodeRequest:
+    RegisterRequest:
       type: object
       required:
-        - email
+        - username
+        - password
+        - turnstileToken
       properties:
-        email:
+        username:
           type: string
-          format: email
-          maxLength: 254
-        purpose:
+          pattern: "^[A-Za-z][A-Za-z0-9_]{2,19}$"
+          maxLength: 20
+        password:
           type: string
-          enum:
-            - login
-            - email_change
-            - deletion
-          default: login
-          description: Purpose of the verification code.
-    EmailSessionRequest:
+          minLength: 8
+          maxLength: 128
+        turnstileToken:
+          type: string
+          description: Cloudflare Turnstile response token.
+    LoginRequest:
       type: object
       required:
-        - email
-        - code
+        - username
+        - password
+        - turnstileToken
       properties:
-        email:
+        username:
           type: string
-          format: email
-          maxLength: 254
-        code:
+          pattern: "^[A-Za-z][A-Za-z0-9_]{2,19}$"
+          maxLength: 20
+        password:
           type: string
-          pattern: "^[0-9]{6}$"
+          minLength: 8
+          maxLength: 128
+        turnstileToken:
+          type: string
+          description: Cloudflare Turnstile response token.
     RefreshTokenRequest:
       type: object
       required:
@@ -2462,11 +2483,11 @@ components:
     AccountDeletionRequest:
       type: object
       required:
-        - verificationCode
+        - password
       properties:
-        verificationCode:
+        password:
           type: string
-          pattern: "^[0-9]{6}$"
+          minLength: 8
     AccountDeletionState:
       type: object
       required:
