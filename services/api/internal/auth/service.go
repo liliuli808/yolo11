@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
@@ -37,6 +38,17 @@ var (
 	ErrInvalidUsername         = errors.New("invalid username")
 	ErrInvalidPassword         = errors.New("invalid password")
 )
+
+// dummyPasswordHash is a precomputed bcrypt hash used in the nil-user Login
+// branch to burn roughly the same time as a real password comparison, avoiding
+// latency-based username enumeration.
+var dummyPasswordHash = func() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte("lantern-dummy-password"), bcrypt.DefaultCost)
+	if err != nil {
+		panic(err)
+	}
+	return h
+}()
 
 // RateLimitError carries the retry window for a rate-limited request.
 type RateLimitError struct {
@@ -169,7 +181,8 @@ func (s *Service) Register(ctx context.Context, username, password, turnstileTok
 		return nil, ErrUsernameTaken
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	sum := sha512.Sum384([]byte(password))
+	hash, err := bcrypt.GenerateFromPassword(sum[:], bcrypt.DefaultCost)
 	if err != nil {
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
@@ -183,7 +196,6 @@ func (s *Service) Register(ctx context.Context, username, password, turnstileTok
 	if err != nil {
 		return nil, err
 	}
-	tokens.UserID = user.ID
 
 	s.audit(ctx, &user.ID, &tokens.SessionID, "account.registered", ip, userAgent, fingerprint, nil)
 	return tokens, nil
@@ -217,9 +229,15 @@ func (s *Service) Login(ctx context.Context, username, password, turnstileToken,
 		return nil, fmt.Errorf("lookup user: %w", err)
 	}
 	if user == nil {
+		sum := sha512.Sum384([]byte(password))
+		_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, sum[:])
 		return nil, ErrInvalidCredentials
 	}
-	if user.PasswordHash == "" || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+	if user.PasswordHash == "" {
+		return nil, ErrInvalidCredentials
+	}
+	sum := sha512.Sum384([]byte(password))
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), sum[:]) != nil {
 		return nil, ErrInvalidCredentials
 	}
 
@@ -264,6 +282,7 @@ func (s *Service) createSession(ctx context.Context, userID string, isStaff bool
 		ExpiresIn:    expiresIn,
 		IsStaff:      isStaff,
 		SessionID:    session.ID,
+		UserID:       userID,
 	}, nil
 }
 
@@ -273,7 +292,11 @@ func (s *Service) VerifyPasswordForDeletion(ctx context.Context, userID, passwor
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrUserNotFound, err)
 	}
-	if user.PasswordHash == "" || bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+	if user.PasswordHash == "" {
+		return ErrDeletionInvalidPassword
+	}
+	sum := sha512.Sum384([]byte(password))
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), sum[:]) != nil {
 		return ErrDeletionInvalidPassword
 	}
 	return nil
