@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/sha512"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yiguan/api/internal/platform/config"
+	"golang.org/x/crypto/bcrypt"
 )
 
 var testDB *pgxpool.Pool
@@ -93,6 +95,7 @@ func newTestConfig() *config.Config {
 		EmailFrom:       "noreply@example.com",
 		AccessTokenTTL:  15 * time.Minute,
 		RefreshTokenTTL: 7 * 24 * time.Hour,
+		StaffUsernames:  []string{"admin"},
 	}
 }
 
@@ -122,27 +125,17 @@ func newTestService() (*Service, *recordingMailer) {
 	mailer := &recordingMailer{}
 	repo := NewPostgresRepository(testDB)
 	limiter := NewMemoryLimiter()
-	return NewService(newTestConfig(), repo, mailer, limiter), mailer
+	return NewService(newTestConfig(), repo, mailer, limiter, &StubTurnstile{}), mailer
 }
 
-func TestCreateEmailSession_Success(t *testing.T) {
+func TestRegister_Success(t *testing.T) {
 	cleanTables(t)
-	svc, mailer := newTestService()
+	svc, _ := newTestService()
 	ctx := context.Background()
 
-	email := "alice@example.com"
-	if err := svc.RequestEmailCode(ctx, email, "login", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request code: %v", err)
-	}
-
-	code := mailer.LastCode()
-	if code == "" {
-		t.Fatal("no code sent")
-	}
-
-	tokens, err := svc.CreateEmailSession(ctx, email, code, "127.0.0.1", "fp1", "ua")
+	tokens, err := svc.Register(ctx, "Alice_1", "password123", "tok", "127.0.0.1", "fp", "ua")
 	if err != nil {
-		t.Fatalf("create session: %v", err)
+		t.Fatalf("register: %v", err)
 	}
 	if tokens.AccessToken == "" {
 		t.Error("expected access token")
@@ -150,86 +143,111 @@ func TestCreateEmailSession_Success(t *testing.T) {
 	if tokens.RefreshToken == "" {
 		t.Error("expected refresh token")
 	}
-	if tokens.TokenType != "Bearer" {
-		t.Errorf("expected Bearer token type, got %q", tokens.TokenType)
+
+	user, err := svc.repo.GetUserByUsername(ctx, "alice_1")
+	if err != nil {
+		t.Fatalf("lookup user: %v", err)
+	}
+	if user == nil {
+		t.Fatal("expected user")
+	}
+	sum := sha512.Sum384([]byte("password123"))
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), sum[:]); err != nil {
+		t.Errorf("stored password hash does not match password: %v", err)
 	}
 }
 
-func TestCreateEmailSession_CodeReuseFails(t *testing.T) {
-	cleanTables(t)
-	svc, mailer := newTestService()
-	ctx := context.Background()
-
-	email := "reuse@example.com"
-	if err := svc.RequestEmailCode(ctx, email, "login", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request code: %v", err)
-	}
-	code := mailer.LastCode()
-
-	if _, err := svc.CreateEmailSession(ctx, email, code, "127.0.0.1", "fp1", "ua"); err != nil {
-		t.Fatalf("first create session: %v", err)
-	}
-
-	if _, err := svc.CreateEmailSession(ctx, email, code, "127.0.0.1", "fp1", "ua"); !errors.Is(err, ErrInvalidCode) {
-		t.Fatalf("expected ErrInvalidCode on reuse, got %v", err)
-	}
-}
-
-func TestCreateEmailSession_ExpiredCodeFails(t *testing.T) {
-	cleanTables(t)
-	svc, mailer := newTestService()
-	ctx := context.Background()
-
-	email := "expired@example.com"
-	if err := svc.RequestEmailCode(ctx, email, "login", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request code: %v", err)
-	}
-	code := mailer.LastCode()
-
-	// Force the latest code to expire by updating the database directly.
-	if _, err := testDB.Exec(ctx, "UPDATE email_codes SET expires_at = now() - interval '1 minute' WHERE email = $1", NormalizeEmail(email)); err != nil {
-		t.Fatalf("expire code: %v", err)
-	}
-
-	if _, err := svc.CreateEmailSession(ctx, email, code, "127.0.0.1", "fp1", "ua"); !errors.Is(err, ErrInvalidCode) {
-		t.Fatalf("expected ErrInvalidCode for expired code, got %v", err)
-	}
-}
-
-func TestRequestEmailCode_RateLimitedByEmail(t *testing.T) {
+func TestRegister_UsernameTaken(t *testing.T) {
 	cleanTables(t)
 	svc, _ := newTestService()
 	ctx := context.Background()
-	email := "rate@example.com"
 
-	for i := 0; i < 5; i++ {
-		if err := svc.RequestEmailCode(ctx, email, "login", "127.0.0.1", "fp1"); err != nil {
-			t.Fatalf("request %d: %v", i+1, err)
-		}
+	if _, err := svc.Register(ctx, "bob", "password123", "tok", "127.0.0.1", "fp1", "ua"); err != nil {
+		t.Fatalf("first register: %v", err)
 	}
+	if _, err := svc.Register(ctx, "Bob", "password123", "tok", "127.0.0.1", "fp2", "ua"); !errors.Is(err, ErrUsernameTaken) {
+		t.Fatalf("expected ErrUsernameTaken, got %v", err)
+	}
+}
 
-	err := svc.RequestEmailCode(ctx, email, "login", "127.0.0.1", "fp1")
-	var rateLimitErr *RateLimitError
-	if !errors.As(err, &rateLimitErr) {
-		t.Fatalf("expected rate limit error, got %v", err)
+func TestRegister_CaptchaFails(t *testing.T) {
+	cleanTables(t)
+	cfg := newTestConfig()
+	repo := NewPostgresRepository(testDB)
+	limiter := NewMemoryLimiter()
+	svc := NewService(cfg, repo, nil, limiter, &StubTurnstile{Fail: true})
+	ctx := context.Background()
+
+	if _, err := svc.Register(ctx, "carol", "password123", "tok", "127.0.0.1", "fp", "ua"); !errors.Is(err, ErrCaptchaFailed) {
+		t.Fatalf("expected ErrCaptchaFailed, got %v", err)
 	}
-	if rateLimitErr.RetryAfter <= 0 {
-		t.Error("expected positive retry after")
+}
+
+func TestLogin_Success(t *testing.T) {
+	cleanTables(t)
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	if _, err := svc.Register(ctx, "dave", "password123", "tok", "127.0.0.1", "fp", "ua"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	tokens, err := svc.Login(ctx, "dave", "password123", "tok", "127.0.0.1", "fp", "ua")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if tokens.AccessToken == "" {
+		t.Error("expected access token")
+	}
+}
+
+func TestLogin_WrongPassword(t *testing.T) {
+	cleanTables(t)
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	if _, err := svc.Register(ctx, "erin", "password123", "tok", "127.0.0.1", "fp", "ua"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, err := svc.Login(ctx, "erin", "wrongpass", "tok", "127.0.0.1", "fp", "ua"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+	}
+}
+
+func TestLogin_UnknownUser(t *testing.T) {
+	cleanTables(t)
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	if _, err := svc.Login(ctx, "nobody", "password123", "tok", "127.0.0.1", "fp", "ua"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+	}
+}
+
+func TestVerifyPasswordForDeletion(t *testing.T) {
+	cleanTables(t)
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	tokens, err := svc.Register(ctx, "frank", "password123", "tok", "127.0.0.1", "fp", "ua")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := svc.VerifyPasswordForDeletion(ctx, tokens.UserID, "password123"); err != nil {
+		t.Fatalf("expected nil for correct password, got %v", err)
+	}
+	if err := svc.VerifyPasswordForDeletion(ctx, tokens.UserID, "wrongpass"); err == nil {
+		t.Fatal("expected error for wrong password")
 	}
 }
 
 func TestRefreshSession_RotatesToken(t *testing.T) {
 	cleanTables(t)
-	svc, mailer := newTestService()
+	svc, _ := newTestService()
 	ctx := context.Background()
 
-	email := "rotate@example.com"
-	if err := svc.RequestEmailCode(ctx, email, "login", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request code: %v", err)
-	}
-	tokens, err := svc.CreateEmailSession(ctx, email, mailer.LastCode(), "127.0.0.1", "fp1", "ua")
+	tokens, err := svc.Register(ctx, "rotate", "password123", "tok", "127.0.0.1", "fp1", "ua")
 	if err != nil {
-		t.Fatalf("create session: %v", err)
+		t.Fatalf("register: %v", err)
 	}
 
 	result, err := svc.RefreshSession(ctx, tokens.RefreshToken, "127.0.0.1", "fp1", "ua")
@@ -251,16 +269,12 @@ func TestRefreshSession_RotatesToken(t *testing.T) {
 
 func TestRefreshSession_RevokedSessionRejected(t *testing.T) {
 	cleanTables(t)
-	svc, mailer := newTestService()
+	svc, _ := newTestService()
 	ctx := context.Background()
 
-	email := "revoked@example.com"
-	if err := svc.RequestEmailCode(ctx, email, "login", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request code: %v", err)
-	}
-	tokens, err := svc.CreateEmailSession(ctx, email, mailer.LastCode(), "127.0.0.1", "fp1", "ua")
+	tokens, err := svc.Register(ctx, "revoked", "password123", "tok", "127.0.0.1", "fp1", "ua")
 	if err != nil {
-		t.Fatalf("create session: %v", err)
+		t.Fatalf("register: %v", err)
 	}
 
 	// Revoke the session using its database id. We need to look it up from the refresh hash.
@@ -281,16 +295,12 @@ func TestRefreshSession_RevokedSessionRejected(t *testing.T) {
 
 func TestRequestAccountDeletion_RevokesAllSessions(t *testing.T) {
 	cleanTables(t)
-	svc, mailer := newTestService()
+	svc, _ := newTestService()
 	ctx := context.Background()
 
-	email := "delete@example.com"
-	if err := svc.RequestEmailCode(ctx, email, "login", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request code: %v", err)
-	}
-	tokens, err := svc.CreateEmailSession(ctx, email, mailer.LastCode(), "127.0.0.1", "fp1", "ua")
+	tokens, err := svc.Register(ctx, "delete", "password123", "tok", "127.0.0.1", "fp1", "ua")
 	if err != nil {
-		t.Fatalf("create session: %v", err)
+		t.Fatalf("register: %v", err)
 	}
 
 	user, err := svc.repo.GetUserByID(ctx, UserIDFromToken(ctx, svc, tokens.AccessToken))
@@ -313,16 +323,12 @@ func TestRequestAccountDeletion_RevokesAllSessions(t *testing.T) {
 
 func TestRequestAccountDeletion_AlreadyPending(t *testing.T) {
 	cleanTables(t)
-	svc, mailer := newTestService()
+	svc, _ := newTestService()
 	ctx := context.Background()
 
-	email := "delete2@example.com"
-	if err := svc.RequestEmailCode(ctx, email, "login", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request code: %v", err)
-	}
-	tokens, err := svc.CreateEmailSession(ctx, email, mailer.LastCode(), "127.0.0.1", "fp1", "ua")
+	tokens, err := svc.Register(ctx, "delete2", "password123", "tok", "127.0.0.1", "fp1", "ua")
 	if err != nil {
-		t.Fatalf("create session: %v", err)
+		t.Fatalf("register: %v", err)
 	}
 
 	userID := UserIDFromToken(ctx, svc, tokens.AccessToken)
@@ -336,16 +342,12 @@ func TestRequestAccountDeletion_AlreadyPending(t *testing.T) {
 
 func TestPurgeDeletedAccounts_PurgesPastGracePeriod(t *testing.T) {
 	cleanTables(t)
-	svc, mailer := newTestService()
+	svc, _ := newTestService()
 	ctx := context.Background()
 
-	email := "purge@example.com"
-	if err := svc.RequestEmailCode(ctx, email, "login", "127.0.0.1", "fp1"); err != nil {
-		t.Fatalf("request code: %v", err)
-	}
-	tokens, err := svc.CreateEmailSession(ctx, email, mailer.LastCode(), "127.0.0.1", "fp1", "ua")
+	tokens, err := svc.Register(ctx, "purge", "password123", "tok", "127.0.0.1", "fp1", "ua")
 	if err != nil {
-		t.Fatalf("create session: %v", err)
+		t.Fatalf("register: %v", err)
 	}
 	userID := UserIDFromToken(ctx, svc, tokens.AccessToken)
 
