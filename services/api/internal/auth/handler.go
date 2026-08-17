@@ -36,22 +36,24 @@ func NewHandler(service *Service, cfg *config.Config) *Handler {
 
 // Mount registers auth routes on r.
 func (h *Handler) Mount(r chi.Router) {
-	r.Post("/auth/email-codes", h.SendEmailCode)
-	r.Post("/auth/email-sessions", h.CreateEmailSession)
+	r.Post("/auth/register", h.Register)
+	r.Post("/auth/login", h.Login)
 	r.Post("/auth/refresh", h.RefreshSession)
 
 	r.With(h.AuthMiddleware).Delete("/auth/session", h.DeleteSession)
 	r.With(h.AuthMiddleware).Delete("/me", h.DeleteMe)
 }
 
-type emailCodeRequest struct {
-	Email   string `json:"email"`
-	Purpose string `json:"purpose"`
+type registerRequest struct {
+	Username       string `json:"username"`
+	Password       string `json:"password"`
+	TurnstileToken string `json:"turnstileToken"`
 }
 
-type emailSessionRequest struct {
-	Email string `json:"email"`
-	Code  string `json:"code"`
+type loginRequest struct {
+	Username       string `json:"username"`
+	Password       string `json:"password"`
+	TurnstileToken string `json:"turnstileToken"`
 }
 
 type refreshTokenRequest struct {
@@ -59,7 +61,7 @@ type refreshTokenRequest struct {
 }
 
 type accountDeletionRequest struct {
-	VerificationCode string `json:"verificationCode"`
+	Password string `json:"password"`
 }
 
 type sessionResponse struct {
@@ -67,6 +69,7 @@ type sessionResponse struct {
 	RefreshToken string  `json:"refreshToken"`
 	TokenType    string  `json:"tokenType"`
 	ExpiresIn    int     `json:"expiresIn"`
+	UserID       string  `json:"userId"`
 	PersonaID    *string `json:"personaId"`
 	IsStaff      bool    `json:"isStaff"`
 }
@@ -83,45 +86,13 @@ type accountDeletionResponse struct {
 	GracePeriodEndsAt string `json:"gracePeriodEndsAt"`
 }
 
-// SendEmailCode handles POST /v1/auth/email-codes.
-func (h *Handler) SendEmailCode(w http.ResponseWriter, r *http.Request) {
+// Register handles POST /v1/auth/register.
+func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireIdempotencyKey(r, w); !ok {
 		return
 	}
 
-	var req emailCodeRequest
-	if err := httpx.ReadJSON(r, &req); err != nil {
-		httpError(r.Context(), w, http.StatusBadRequest, "VALIDATION_FAILED", "invalid request body")
-		return
-	}
-
-	purpose := strings.TrimSpace(req.Purpose)
-	if purpose == "" {
-		purpose = "login"
-	}
-	if purpose != "login" && purpose != "email_change" && purpose != "deletion" {
-		httpError(r.Context(), w, http.StatusBadRequest, "VALIDATION_FAILED", "invalid purpose")
-		return
-	}
-
-	ip := clientIP(r, h.cfg.RateLimitBehindProxy)
-	fingerprint := r.Header.Get("X-Device-Fingerprint")
-
-	if err := h.service.RequestEmailCode(r.Context(), req.Email, purpose, ip, fingerprint); err != nil {
-		h.respondDomainError(r.Context(), w, err)
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// CreateEmailSession handles POST /v1/auth/email-sessions.
-func (h *Handler) CreateEmailSession(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.requireIdempotencyKey(r, w); !ok {
-		return
-	}
-
-	var req emailSessionRequest
+	var req registerRequest
 	if err := httpx.ReadJSON(r, &req); err != nil {
 		httpError(r.Context(), w, http.StatusBadRequest, "VALIDATION_FAILED", "invalid request body")
 		return
@@ -130,7 +101,7 @@ func (h *Handler) CreateEmailSession(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r, h.cfg.RateLimitBehindProxy)
 	fingerprint := r.Header.Get("X-Device-Fingerprint")
 
-	tokens, err := h.service.CreateEmailSession(r.Context(), req.Email, req.Code, ip, fingerprint, r.UserAgent())
+	tokens, err := h.service.Register(r.Context(), req.Username, req.Password, req.TurnstileToken, ip, fingerprint, r.UserAgent())
 	if err != nil {
 		h.respondDomainError(r.Context(), w, err)
 		return
@@ -138,15 +109,51 @@ func (h *Handler) CreateEmailSession(w http.ResponseWriter, r *http.Request) {
 
 	h.setRefreshTokenCookie(w, tokens.RefreshToken, int(h.cfg.RefreshTokenTTL.Seconds()))
 
-	if err := httpx.WriteJSON(w, http.StatusCreated, sessionResponse{
+	if err := httpx.WriteJSON(w, http.StatusCreated, h.sessionResponse(tokens)); err != nil {
+		httpError(r.Context(), w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to write response")
+	}
+}
+
+// Login handles POST /v1/auth/login.
+func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireIdempotencyKey(r, w); !ok {
+		return
+	}
+
+	var req loginRequest
+	if err := httpx.ReadJSON(r, &req); err != nil {
+		httpError(r.Context(), w, http.StatusBadRequest, "VALIDATION_FAILED", "invalid request body")
+		return
+	}
+
+	ip := clientIP(r, h.cfg.RateLimitBehindProxy)
+	fingerprint := r.Header.Get("X-Device-Fingerprint")
+
+	tokens, err := h.service.Login(r.Context(), req.Username, req.Password, req.TurnstileToken, ip, fingerprint, r.UserAgent())
+	if err != nil {
+		h.respondDomainError(r.Context(), w, err)
+		return
+	}
+
+	h.setRefreshTokenCookie(w, tokens.RefreshToken, int(h.cfg.RefreshTokenTTL.Seconds()))
+
+	if err := httpx.WriteJSON(w, http.StatusOK, h.sessionResponse(tokens)); err != nil {
+		httpError(r.Context(), w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to write response")
+	}
+}
+
+// sessionResponse builds the session payload from service tokens. The persona
+// is not resolved at this stage; it remains nil until persona selection is
+// implemented, matching the previous email-session flow.
+func (h *Handler) sessionResponse(tokens *TokenResponse) sessionResponse {
+	return sessionResponse{
 		AccessToken:  tokens.AccessToken,
 		RefreshToken: tokens.RefreshToken,
 		TokenType:    tokens.TokenType,
 		ExpiresIn:    tokens.ExpiresIn,
-		PersonaID:    nil,
+		UserID:       tokens.UserID,
+		PersonaID:    tokens.PersonaID,
 		IsStaff:      tokens.IsStaff,
-	}); err != nil {
-		httpError(r.Context(), w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to write response")
 	}
 }
 
@@ -230,17 +237,11 @@ func (h *Handler) DeleteMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.service.repo.GetUserByID(r.Context(), userID)
-	if err != nil {
-		h.respondDomainError(r.Context(), w, fmt.Errorf("%w: %v", ErrUserNotFound, err))
-		return
-	}
-
 	ip := clientIP(r, h.cfg.RateLimitBehindProxy)
 	fingerprint := r.Header.Get("X-Device-Fingerprint")
 
-	if err := h.service.VerifyEmailCode(r.Context(), user.EmailNormalized, req.VerificationCode, "deletion"); err != nil {
-		h.respondDomainError(r.Context(), w, ErrDeletionInvalidCode)
+	if err := h.service.VerifyPasswordForDeletion(r.Context(), userID, req.Password); err != nil {
+		h.respondDomainError(r.Context(), w, err)
 		return
 	}
 
@@ -390,6 +391,18 @@ func (h *Handler) respondDomainError(ctx context.Context, w http.ResponseWriter,
 		httpError(ctx, w, http.StatusConflict, "ME.DELETION_ALREADY_PENDING", "account deletion is already in progress")
 	case errors.Is(err, ErrDeletionInvalidCode):
 		httpError(ctx, w, http.StatusForbidden, "ME.DELETION_INVALID_CODE", "the confirmation code is incorrect or expired")
+	case errors.Is(err, ErrDeletionInvalidPassword):
+		httpError(ctx, w, http.StatusForbidden, "ME.DELETION_INVALID_PASSWORD", "password is incorrect")
+	case errors.Is(err, ErrInvalidUsername):
+		httpError(ctx, w, http.StatusBadRequest, "AUTH.INVALID_USERNAME", "username must be 3-20 letters, digits, or underscores")
+	case errors.Is(err, ErrInvalidPassword):
+		httpError(ctx, w, http.StatusBadRequest, "AUTH.INVALID_PASSWORD", "password must be at least 8 characters")
+	case errors.Is(err, ErrUsernameTaken):
+		httpError(ctx, w, http.StatusConflict, "AUTH.USERNAME_TAKEN", "username is already taken")
+	case errors.Is(err, ErrInvalidCredentials):
+		httpError(ctx, w, http.StatusUnauthorized, "AUTH.INVALID_CREDENTIALS", "invalid username or password")
+	case errors.Is(err, ErrCaptchaFailed):
+		httpError(ctx, w, http.StatusBadRequest, "AUTH.CAPTCHA_FAILED", "human verification failed, please try again")
 	default:
 		httpError(ctx, w, http.StatusInternalServerError, "INTERNAL_ERROR", "something went wrong. please try again")
 	}
