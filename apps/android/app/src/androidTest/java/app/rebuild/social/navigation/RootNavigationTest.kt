@@ -16,14 +16,14 @@ class RootNavigationTest {
     val composeTestRule = createAndroidComposeRule<androidx.activity.ComponentActivity>()
 
     @Test
-    fun unauthenticatedFlow_startsAtWelcomeAndNavigatesToSignIn() {
+    fun unauthenticatedFlow_startsAtWelcomeAndNavigatesToLogin() {
         composeTestRule.setContent {
             RootNavigation(isAuthenticated = false)
         }
 
         composeTestRule.onNodeWithTag("welcome-screen").assertIsDisplayed()
-        composeTestRule.onNodeWithText("Get started").performClick()
-        composeTestRule.onNodeWithTag("email-signin-screen").assertIsDisplayed()
+        composeTestRule.onNodeWithText("开始").performClick()
+        composeTestRule.onNodeWithTag("login-screen").assertIsDisplayed()
     }
 
     @Test

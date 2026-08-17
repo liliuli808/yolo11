@@ -2,6 +2,7 @@ package app.rebuild.social.core.design
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Inbox
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -36,7 +37,7 @@ class DesignComponentsTest {
                 EmptyState(
                     title = "Nothing here",
                     message = "When notes arrive, they will appear here.",
-                    icon = Icons.Outlined.Inbox
+                    icon = rememberVectorPainter(Icons.Outlined.Inbox)
                 )
             }
         }
