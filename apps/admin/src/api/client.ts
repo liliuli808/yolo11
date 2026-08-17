@@ -50,12 +50,13 @@ async function request<T>(method: string, path: string, body?: unknown, idempote
   return data as T;
 }
 
-export async function sendEmailCode(email: string): Promise<void> {
-  return request('POST', '/auth/email-codes', { email, purpose: 'login' }, `admin-code-${Date.now()}`);
-}
-
-export async function createEmailSession(email: string, code: string): Promise<Session> {
-  const session = await request<Session>('POST', '/auth/email-sessions', { email, code }, `admin-session-${Date.now()}`);
+export async function login(username: string, password: string, turnstileToken: string): Promise<Session> {
+  const session = await request<Session>(
+    'POST',
+    '/auth/login',
+    { username, password, turnstileToken },
+    `admin-login-${Date.now()}`
+  );
   setToken(session.accessToken);
   localStorage.setItem('lantern_admin_refresh', session.refreshToken);
   return session;

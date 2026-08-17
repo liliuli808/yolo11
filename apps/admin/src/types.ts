@@ -3,6 +3,7 @@ export interface Session {
   refreshToken: string;
   tokenType: string;
   expiresIn: number;
+  userId: string;
   personaId: string | null;
   isStaff: boolean;
 }
