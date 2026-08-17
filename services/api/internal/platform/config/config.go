@@ -38,8 +38,12 @@ type Config struct {
 	SMTPUsername    string
 	SMTPPassword    string
 	SMTPTLS         bool
-	StaffEmails     []string
+	StaffUsernames  []string
 	AdminSessionTTL time.Duration
+
+	TurnstileSecretKey        string
+	TurnstileSiteKey          string
+	TurnstileExpectedHostname string
 }
 
 // loaderState carries per-load overrides (e.g. from env files) without
@@ -121,6 +125,7 @@ func Load(opts ...LoaderOption) (*Config, error) {
 		{"S3_BUCKET", state.getenv("S3_BUCKET")},
 		{"JWT_SIGNING_KEY", state.getenv("JWT_SIGNING_KEY")},
 		{"EMAIL_CODE_KEY", state.getenv("EMAIL_CODE_KEY")},
+		{"TURNSTILE_SECRET_KEY", state.getenv("TURNSTILE_SECRET_KEY")},
 		{"EMAIL_FROM", state.getenv("EMAIL_FROM")},
 		{"PUBLIC_BASE_URL", state.getenv("PUBLIC_BASE_URL")},
 	}
@@ -142,8 +147,8 @@ func Load(opts ...LoaderOption) (*Config, error) {
 		S3Bucket:                  required[3].value,
 		JWTSigningKey:             required[4].value,
 		EmailCodeKey:              required[5].value,
-		EmailFrom:                 required[6].value,
-		PublicBaseURL:             required[7].value,
+		EmailFrom:                 required[7].value,
+		PublicBaseURL:             required[8].value,
 		ServerPort:                defaultString(state.getenv("SERVER_PORT"), "8081"),
 		LogLevel:                  defaultString(state.getenv("LOG_LEVEL"), "info"),
 		Environment:               defaultString(state.getenv("ENVIRONMENT"), "development"),
@@ -161,7 +166,10 @@ func Load(opts ...LoaderOption) (*Config, error) {
 		SMTPUsername:              defaultString(state.getenv("SMTP_USERNAME"), ""),
 		SMTPPassword:              defaultString(state.getenv("SMTP_PASSWORD"), ""),
 		SMTPTLS:                   parseBool(state.getenv("SMTP_TLS"), false),
-		StaffEmails:               parseStringList(state.getenv("STAFF_EMAILS")),
+		StaffUsernames:            parseStringList(state.getenv("STAFF_USERNAMES")),
+		TurnstileSecretKey:        required[6].value,
+		TurnstileSiteKey:          defaultString(state.getenv("TURNSTILE_SITE_KEY"), ""),
+		TurnstileExpectedHostname: defaultString(state.getenv("TURNSTILE_EXPECTED_HOSTNAME"), ""),
 		AdminSessionTTL:           parseDuration(state.getenv("ADMIN_SESSION_TTL"), 8*time.Hour),
 	}
 

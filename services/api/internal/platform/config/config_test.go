@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -15,6 +16,7 @@ func setValidEnv(t *testing.T) {
 	t.Setenv("S3_BUCKET", "uploads")
 	t.Setenv("JWT_SIGNING_KEY", "secret")
 	t.Setenv("EMAIL_CODE_KEY", "email-code-secret-key")
+	t.Setenv("TURNSTILE_SECRET_KEY", "test-turnstile-secret")
 	t.Setenv("EMAIL_FROM", "noreply@example.com")
 	t.Setenv("PUBLIC_BASE_URL", "http://localhost:8080")
 }
@@ -128,6 +130,19 @@ func TestLoad_MissingPublicBaseURL(t *testing.T) {
 	}
 }
 
+func TestLoad_MissingTurnstileSecretKey(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("TURNSTILE_SECRET_KEY", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for missing TURNSTILE_SECRET_KEY")
+	}
+	if !containsMissingVar(err, "TURNSTILE_SECRET_KEY") {
+		t.Errorf("error should mention TURNSTILE_SECRET_KEY: %v", err)
+	}
+}
+
 func TestLoad_CustomPort(t *testing.T) {
 	setValidEnv(t)
 	t.Setenv("SERVER_PORT", "3000")
@@ -229,6 +244,39 @@ func TestLoad_RateLimitBehindProxy(t *testing.T) {
 	}
 	if !cfg.RateLimitBehindProxy {
 		t.Error("expected RateLimitBehindProxy to be true")
+	}
+}
+
+func TestLoad_StaffUsernames(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("STAFF_USERNAMES", "a,b")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !reflect.DeepEqual(cfg.StaffUsernames, []string{"a", "b"}) {
+		t.Errorf("expected StaffUsernames [a b], got %v", cfg.StaffUsernames)
+	}
+}
+
+func TestLoad_TurnstileConfig(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("TURNSTILE_SITE_KEY", "test-site-key")
+	t.Setenv("TURNSTILE_EXPECTED_HOSTNAME", "example.com")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if cfg.TurnstileSecretKey != "test-turnstile-secret" {
+		t.Errorf("unexpected TurnstileSecretKey: %q", cfg.TurnstileSecretKey)
+	}
+	if cfg.TurnstileSiteKey != "test-site-key" {
+		t.Errorf("unexpected TurnstileSiteKey: %q", cfg.TurnstileSiteKey)
+	}
+	if cfg.TurnstileExpectedHostname != "example.com" {
+		t.Errorf("unexpected TurnstileExpectedHostname: %q", cfg.TurnstileExpectedHostname)
 	}
 }
 
