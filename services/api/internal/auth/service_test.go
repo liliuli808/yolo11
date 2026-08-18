@@ -512,6 +512,14 @@ func TestRegister_InviteCode_ConcurrentSingleUse(t *testing.T) {
 	if ok != 1 || used != 1 {
 		t.Fatalf("expected 1 success and 1 ErrInviteCodeUsed, got ok=%d used=%d", ok, used)
 	}
+
+	inv, err := svc.repo.GetInviteCode(ctx, code)
+	if err != nil {
+		t.Fatalf("lookup consumed code: %v", err)
+	}
+	if inv.UsedBy == nil {
+		t.Error("expected invite code to be marked used")
+	}
 }
 
 func TestRegister_InviteCode_NormalizesCase(t *testing.T) {
@@ -592,9 +600,21 @@ func TestListInviteCodes_Pagination(t *testing.T) {
 	ctx := context.Background()
 	staffID := ensureStaff(t, svc)
 
+	created := make([]*InviteCode, 3)
+	base := time.Now().UTC().Add(-3 * time.Minute)
 	for i := 0; i < 3; i++ {
-		if _, err := svc.CreateInviteCode(ctx, staffID, nil); err != nil {
+		inv, err := svc.CreateInviteCode(ctx, staffID, nil)
+		if err != nil {
 			t.Fatalf("create invite code %d: %v", i, err)
+		}
+		created[i] = inv
+	}
+	// Backdate each code to a distinct created_at so the strict
+	// created_at < cursor predicate cannot skip a row on ties.
+	for i, inv := range created {
+		ts := base.Add(time.Duration(i) * time.Second)
+		if _, err := testDB.Exec(ctx, "UPDATE invite_codes SET created_at = $2 WHERE id = $1", inv.ID, ts); err != nil {
+			t.Fatalf("backdate invite %s: %v", inv.ID, err)
 		}
 	}
 
@@ -607,6 +627,9 @@ func TestListInviteCodes_Pagination(t *testing.T) {
 	}
 	if !hasMore || nextCursor == nil {
 		t.Error("expected hasMore and a next cursor")
+	}
+	if !codes[0].CreatedAt.After(codes[1].CreatedAt) {
+		t.Error("expected page 1 codes ordered newest-first")
 	}
 
 	codes2, nextCursor2, hasMore2, err := svc.ListInviteCodes(ctx, *nextCursor, 2)
@@ -621,6 +644,9 @@ func TestListInviteCodes_Pagination(t *testing.T) {
 	}
 	if nextCursor2 != nil {
 		t.Errorf("expected nil next cursor, got %q", *nextCursor2)
+	}
+	if !codes2[0].CreatedAt.Before(codes[0].CreatedAt) {
+		t.Error("expected page 2 code strictly older than page 1 (disjoint pages)")
 	}
 }
 
