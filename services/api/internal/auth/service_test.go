@@ -420,6 +420,210 @@ func TestPurgeDeletedAccounts_PurgesPastGracePeriod(t *testing.T) {
 	}
 }
 
+func TestRegister_InviteCode_Invalid(t *testing.T) {
+	cleanTables(t)
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	if _, err := svc.Register(ctx, "noinvite", "password123", "tok", "NOPE-NOPE", "127.0.0.1", "fp", "ua"); !errors.Is(err, ErrInviteCodeInvalid) {
+		t.Fatalf("expected ErrInviteCodeInvalid, got %v", err)
+	}
+}
+
+func TestRegister_InviteCode_Used(t *testing.T) {
+	cleanTables(t)
+	svc, _ := newTestService()
+	ctx := context.Background()
+	code := freshInviteCode(t, svc)
+
+	if _, err := svc.Register(ctx, "usercode", "password123", "tok", code, "127.0.0.1", "fp1", "ua"); err != nil {
+		t.Fatalf("first register: %v", err)
+	}
+	if _, err := svc.Register(ctx, "usercode2", "password123", "tok", code, "127.0.0.1", "fp2", "ua"); !errors.Is(err, ErrInviteCodeUsed) {
+		t.Fatalf("expected ErrInviteCodeUsed, got %v", err)
+	}
+}
+
+func TestRegister_InviteCode_Expired(t *testing.T) {
+	cleanTables(t)
+	svc, _ := newTestService()
+	ctx := context.Background()
+	staffID := ensureStaff(t, svc)
+	past := time.Now().UTC().Add(-time.Hour)
+	inv, err := svc.CreateInviteCode(ctx, staffID, &past)
+	if err != nil {
+		t.Fatalf("create expired invite: %v", err)
+	}
+
+	if _, err := svc.Register(ctx, "expireduser", "password123", "tok", inv.Code, "127.0.0.1", "fp", "ua"); !errors.Is(err, ErrInviteCodeExpired) {
+		t.Fatalf("expected ErrInviteCodeExpired, got %v", err)
+	}
+}
+
+func TestRegister_UsernameTaken_DoesNotConsumeInviteCode(t *testing.T) {
+	cleanTables(t)
+	svc, _ := newTestService()
+	ctx := context.Background()
+
+	code := freshInviteCode(t, svc)
+	if _, err := svc.Register(ctx, "alice", "password123", "tok", code, "127.0.0.1", "fp1", "ua"); err != nil {
+		t.Fatalf("first register: %v", err)
+	}
+
+	second := freshInviteCode(t, svc)
+	if _, err := svc.Register(ctx, "alice", "password123", "tok", second, "127.0.0.1", "fp2", "ua"); !errors.Is(err, ErrUsernameTaken) {
+		t.Fatalf("expected ErrUsernameTaken, got %v", err)
+	}
+
+	if _, err := svc.Register(ctx, "bob", "password123", "tok", second, "127.0.0.1", "fp3", "ua"); err != nil {
+		t.Fatalf("expected code %s to remain usable, register failed: %v", second, err)
+	}
+}
+
+func TestRegister_InviteCode_ConcurrentSingleUse(t *testing.T) {
+	cleanTables(t)
+	svc, _ := newTestService()
+	ctx := context.Background()
+	code := freshInviteCode(t, svc)
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, name := range []string{"winner", "loser"} {
+		go func(name string) {
+			<-start
+			_, err := svc.Register(ctx, name, "password123", "tok", code, "127.0.0.1", "fp-"+name, "ua")
+			results <- err
+		}(name)
+	}
+	close(start)
+
+	var ok, used int
+	for i := 0; i < 2; i++ {
+		err := <-results
+		switch {
+		case err == nil:
+			ok++
+		case errors.Is(err, ErrInviteCodeUsed):
+			used++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if ok != 1 || used != 1 {
+		t.Fatalf("expected 1 success and 1 ErrInviteCodeUsed, got ok=%d used=%d", ok, used)
+	}
+}
+
+func TestRegister_InviteCode_NormalizesCase(t *testing.T) {
+	cleanTables(t)
+	svc, _ := newTestService()
+	ctx := context.Background()
+	code := freshInviteCode(t, svc)
+
+	if _, err := svc.Register(ctx, "loweruser", "password123", "tok", strings.ToLower(code), "127.0.0.1", "fp1", "ua"); err != nil {
+		t.Fatalf("register with lowercase invite: %v", err)
+	}
+	if _, err := svc.Register(ctx, "loweruser2", "password123", "tok", strings.ToLower(code), "127.0.0.1", "fp2", "ua"); !errors.Is(err, ErrInviteCodeUsed) {
+		t.Fatalf("expected ErrInviteCodeUsed on reused lowercase code, got %v", err)
+	}
+}
+
+func TestCreateInviteCode_GeneratesCode(t *testing.T) {
+	cleanTables(t)
+	svc, _ := newTestService()
+	ctx := context.Background()
+	staffID := ensureStaff(t, svc)
+
+	inv, err := svc.CreateInviteCode(ctx, staffID, nil)
+	if err != nil {
+		t.Fatalf("create invite code: %v", err)
+	}
+	if inv.ID == "" {
+		t.Error("expected id")
+	}
+	if len(inv.Code) < 8 {
+		t.Errorf("expected non-trivial code, got %q", inv.Code)
+	}
+	if inv.UsedAt != nil {
+		t.Error("expected unused code")
+	}
+	got, err := svc.repo.GetInviteCode(ctx, inv.Code)
+	if err != nil {
+		t.Fatalf("lookup invite code: %v", err)
+	}
+	if got == nil || got.ID != inv.ID {
+		t.Error("expected stored invite code to be retrievable")
+	}
+}
+
+func TestRevokeInviteCode_UnusedDeletesUsedRetries(t *testing.T) {
+	cleanTables(t)
+	svc, _ := newTestService()
+	ctx := context.Background()
+	staffID := ensureStaff(t, svc)
+
+	inv, err := svc.CreateInviteCode(ctx, staffID, nil)
+	if err != nil {
+		t.Fatalf("create invite code: %v", err)
+	}
+	if err := svc.RevokeInviteCode(ctx, inv.ID, staffID); err != nil {
+		t.Fatalf("revoke unused: %v", err)
+	}
+	if err := svc.RevokeInviteCode(ctx, inv.ID, staffID); !errors.Is(err, ErrInviteCodeNotFound) {
+		t.Fatalf("expected ErrInviteCodeNotFound after revoke, got %v", err)
+	}
+
+	code := freshInviteCode(t, svc)
+	if _, err := svc.Register(ctx, "consumed", "password123", "tok", code, "127.0.0.1", "fp1", "ua"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	used, err := svc.repo.GetInviteCode(ctx, code)
+	if err != nil {
+		t.Fatalf("lookup used code: %v", err)
+	}
+	if err := svc.RevokeInviteCode(ctx, used.ID, staffID); !errors.Is(err, ErrInviteCodeUsed) {
+		t.Fatalf("expected ErrInviteCodeUsed on used code, got %v", err)
+	}
+}
+
+func TestListInviteCodes_Pagination(t *testing.T) {
+	cleanTables(t)
+	svc, _ := newTestService()
+	ctx := context.Background()
+	staffID := ensureStaff(t, svc)
+
+	for i := 0; i < 3; i++ {
+		if _, err := svc.CreateInviteCode(ctx, staffID, nil); err != nil {
+			t.Fatalf("create invite code %d: %v", i, err)
+		}
+	}
+
+	codes, nextCursor, hasMore, err := svc.ListInviteCodes(ctx, "", 2)
+	if err != nil {
+		t.Fatalf("list first page: %v", err)
+	}
+	if len(codes) != 2 {
+		t.Fatalf("expected 2 codes, got %d", len(codes))
+	}
+	if !hasMore || nextCursor == nil {
+		t.Error("expected hasMore and a next cursor")
+	}
+
+	codes2, nextCursor2, hasMore2, err := svc.ListInviteCodes(ctx, *nextCursor, 2)
+	if err != nil {
+		t.Fatalf("list second page: %v", err)
+	}
+	if len(codes2) != 1 {
+		t.Fatalf("expected 1 code, got %d", len(codes2))
+	}
+	if hasMore2 {
+		t.Error("expected no more pages")
+	}
+	if nextCursor2 != nil {
+		t.Errorf("expected nil next cursor, got %q", *nextCursor2)
+	}
+}
+
 // UserIDFromToken is a test helper that extracts the user id from an access token.
 func UserIDFromToken(ctx context.Context, svc *Service, token string) string {
 	claims, err := svc.ValidateAccessToken(ctx, token)
