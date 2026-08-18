@@ -1613,6 +1613,8 @@ paths:
       responses:
         "204":
           description: Invite code revoked.
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -1685,6 +1687,11 @@ components:
         - validation.failed
         - idempotency.conflict
         - idempotency.missing_key
+        - invite.already_used
+        - invite.code_expired
+        - invite.code_invalid
+        - invite.code_used
+        - invite.not_found
         - auth.invalid_email
         - auth.invalid_code
         - auth.rate_limited
@@ -2719,6 +2726,10 @@ components:
               nullable: true
             hasMore:
               type: boolean
+            limit:
+              type: integer
+              format: int32
+              description: Maximum number of items requested for this page.
     CursorPagePost:
       allOf:
         - $ref: "#/components/schemas/CursorPage"
