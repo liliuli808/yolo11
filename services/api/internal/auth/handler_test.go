@@ -466,3 +466,203 @@ func TestHandler_RateLimited_ReturnsContractCode(t *testing.T) {
 		t.Error("expected Retry-After header")
 	}
 }
+
+func TestHandler_Register_RequiresValidInviteCode(t *testing.T) {
+	h, _ := setupHandlerTest(t)
+	server := httptest.NewServer(mountHandler(h))
+	defer server.Close()
+
+	body, _ := json.Marshal(map[string]any{"username": "inviteuser", "password": "password123", "turnstileToken": "tok", "inviteCode": "BAD-CODE"})
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "register-invite-bad")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("post register: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, resp.StatusCode)
+	}
+
+	var envelope struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if envelope.Code != "INVITE.CODE_INVALID" {
+		t.Errorf("expected INVITE.CODE_INVALID, got %q", envelope.Code)
+	}
+}
+
+func TestHandler_Register_InviteCodeConsumedOnSuccess(t *testing.T) {
+	h, _ := setupHandlerTest(t)
+	server := httptest.NewServer(mountHandler(h))
+	defer server.Close()
+
+	code := freshInviteCode(t, h.service)
+
+	body, _ := json.Marshal(map[string]any{"username": "firstuser", "password": "password123", "turnstileToken": "tok", "inviteCode": code})
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "register-invite-ok")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("post register first: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, resp.StatusCode)
+	}
+
+	body2, _ := json.Marshal(map[string]any{"username": "seconduser", "password": "password123", "turnstileToken": "tok", "inviteCode": code})
+	req2, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/register", bytes.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Idempotency-Key", "register-invite-reuse")
+	resp2, err := client.Do(req2)
+	if err != nil {
+		t.Fatalf("post register second: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, resp2.StatusCode)
+	}
+
+	var envelope struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(resp2.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if envelope.Code != "INVITE.CODE_USED" {
+		t.Errorf("expected INVITE.CODE_USED, got %q", envelope.Code)
+	}
+}
+
+func TestHandler_InviteCodes_StaffLifecycle(t *testing.T) {
+	h, _ := setupHandlerTest(t)
+	server := httptest.NewServer(mountHandler(h))
+	defer server.Close()
+
+	staff := staffSession(t, h.service)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/invite-codes", bytes.NewReader([]byte("{}")))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "staff-create-invite")
+	req.Header.Set("Authorization", bearerHeader(staff))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("post invite codes: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, resp.StatusCode)
+	}
+
+	var created inviteCodeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created invite code: %v", err)
+	}
+	if created.ID == "" || created.Code == "" {
+		t.Error("expected non-empty id and code")
+	}
+
+	req2, _ := http.NewRequest(http.MethodGet, server.URL+"/v1/invite-codes", nil)
+	req2.Header.Set("Authorization", bearerHeader(staff))
+	resp2, err := client.Do(req2)
+	if err != nil {
+		t.Fatalf("get invite codes: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, resp2.StatusCode)
+	}
+	var list struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.NewDecoder(resp2.Body).Decode(&list); err != nil {
+		t.Fatalf("decode invite code list: %v", err)
+	}
+	if len(list.Data) < 1 {
+		t.Fatalf("expected at least one invite code, got %d", len(list.Data))
+	}
+
+	req3, _ := http.NewRequest(http.MethodDelete, server.URL+"/v1/invite-codes/"+created.ID, nil)
+	req3.Header.Set("Authorization", bearerHeader(staff))
+	req3.Header.Set("Idempotency-Key", "staff-delete-invite")
+	resp3, err := client.Do(req3)
+	if err != nil {
+		t.Fatalf("delete invite code: %v", err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected %d, got %d", http.StatusNoContent, resp3.StatusCode)
+	}
+}
+
+func TestHandler_InviteCodes_NonStaffForbidden(t *testing.T) {
+	h, _ := setupHandlerTest(t)
+	server := httptest.NewServer(mountHandler(h))
+	defer server.Close()
+
+	user := registerSession(t, h, server.URL, "plainuser", "password123")
+
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/invite-codes", bytes.NewReader([]byte("{}")))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "nonstaff-create")
+	req.Header.Set("Authorization", bearerHeader(user))
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("post invite codes: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected %d, got %d", http.StatusForbidden, resp.StatusCode)
+	}
+}
+
+func TestHandler_InviteCodes_DeleteUsedIsConflict(t *testing.T) {
+	h, _ := setupHandlerTest(t)
+	server := httptest.NewServer(mountHandler(h))
+	defer server.Close()
+
+	staff := staffSession(t, h.service)
+
+	code := freshInviteCode(t, h.service)
+	if _, err := h.service.Register(context.Background(), "usedup", "password123", "tok", code, "127.0.0.1", "fp", "ua"); err != nil {
+		t.Fatalf("register usedup: %v", err)
+	}
+	inv, err := h.service.repo.GetInviteCode(context.Background(), code)
+	if err != nil {
+		t.Fatalf("get invite code: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodDelete, server.URL+"/v1/invite-codes/"+inv.ID, nil)
+	req.Header.Set("Authorization", bearerHeader(staff))
+	req.Header.Set("Idempotency-Key", "staff-delete-used")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("delete used invite code: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected %d, got %d", http.StatusConflict, resp.StatusCode)
+	}
+
+	var envelope map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if envelope["code"] != "INVITE.ALREADY_USED" {
+		t.Errorf("expected INVITE.ALREADY_USED, got %v", envelope["code"])
+	}
+}
