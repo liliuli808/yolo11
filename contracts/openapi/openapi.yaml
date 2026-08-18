@@ -55,6 +55,8 @@ tags:
     description: Directional persona blocks.
   - name: Moderation
     description: Moderator-only case management.
+  - name: InviteCodes
+    description: Staff-only invite code management.
 paths:
   /v1/healthz:
     get:
@@ -1539,6 +1541,90 @@ paths:
           $ref: "#/components/responses/NotFound"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+  /v1/invite-codes:
+    post:
+      operationId: createInviteCode
+      summary: Create an invite code
+      description: |
+        Staff-only. Generates a single-use invite code. Optionally accepts an
+        expiry timestamp.
+      tags:
+        - InviteCodes
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InviteCodeCreateRequest"
+      responses:
+        "201":
+          description: Invite code created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteCode"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    get:
+      operationId: listInviteCodes
+      summary: List invite codes
+      description: |
+        Staff-only. Paginated list of invite codes newest-first.
+      tags:
+        - InviteCodes
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Paginated list of invite codes.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CursorPageInviteCode"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /v1/invite-codes/{inviteCodeId}:
+    delete:
+      operationId: revokeInviteCode
+      summary: Revoke an invite code
+      description: |
+        Staff-only. Deletes an unused invite code. Revoking a consumed code
+        returns 409.
+      tags:
+        - InviteCodes
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: inviteCodeId
+          in: path
+          required: true
+          description: Invite code id.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Invite code revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Invite code has already been used.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
   securitySchemes:
     BearerAuth:
@@ -2443,6 +2529,7 @@ components:
         - username
         - password
         - turnstileToken
+        - inviteCode
       properties:
         username:
           type: string
@@ -2455,6 +2542,9 @@ components:
         turnstileToken:
           type: string
           description: Cloudflare Turnstile response token.
+        inviteCode:
+          type: string
+          description: Single-use invite code issued by staff.
     LoginRequest:
       type: object
       required:
@@ -2683,6 +2773,50 @@ components:
               type: array
               items:
                 $ref: "#/components/schemas/ModerationCase"
+    InviteCodeCreateRequest:
+      type: object
+      properties:
+        expiresAt:
+          type: string
+          format: date-time
+          description: Optional expiry in RFC3339. Omit or null for no expiry.
+    InviteCode:
+      type: object
+      required:
+        - id
+        - code
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          description: "Formatted as LANTERN-XXXX-XXXX-XXXX-XXXX."
+        usedBy:
+          type: string
+          format: uuid
+          nullable: true
+        usedAt:
+          type: string
+          format: date-time
+          nullable: true
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+    CursorPageInviteCode:
+      allOf:
+        - $ref: "#/components/schemas/CursorPage"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/InviteCode"
   responses:
     BadRequest:
       description: The request was malformed or failed basic validation.
