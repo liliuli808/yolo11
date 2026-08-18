@@ -666,3 +666,33 @@ func TestHandler_InviteCodes_DeleteUsedIsConflict(t *testing.T) {
 		t.Errorf("expected INVITE.ALREADY_USED, got %v", envelope["code"])
 	}
 }
+
+func TestHandler_InviteCodes_CreateRejectsInvalidExpiresAt(t *testing.T) {
+	h, _ := setupHandlerTest(t)
+	server := httptest.NewServer(mountHandler(h))
+	defer server.Close()
+
+	staff := staffSession(t, h.service)
+	body, _ := json.Marshal(map[string]any{"expiresAt": "not-a-date"})
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/invite-codes", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "staff-create-bad-expiry")
+	req.Header.Set("Authorization", bearerHeader(staff))
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("post invite-codes: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	var payload struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if payload.Code != "VALIDATION_FAILED" {
+		t.Fatalf("expected VALIDATION_FAILED, got %q", payload.Code)
+	}
+}
