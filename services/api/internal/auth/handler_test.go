@@ -31,9 +31,10 @@ func mountHandler(h *Handler) http.Handler {
 	return r
 }
 
-func registerSession(t *testing.T, serverURL, username, password string) sessionResponse {
+func registerSession(t *testing.T, h *Handler, serverURL, username, password string) sessionResponse {
 	t.Helper()
-	body, err := json.Marshal(map[string]any{"username": username, "password": password, "turnstileToken": "tok"})
+	code := freshInviteCode(t, h.service)
+	body, err := json.Marshal(map[string]any{"username": username, "password": password, "turnstileToken": "tok", "inviteCode": code})
 	if err != nil {
 		t.Fatalf("marshal register body: %v", err)
 	}
@@ -66,7 +67,8 @@ func registerSession(t *testing.T, serverURL, username, password string) session
 
 func registerSessionToken(t *testing.T, svc *Service, username, password string) sessionResponse {
 	t.Helper()
-	tokens, err := svc.Register(context.Background(), username, password, "tok", "127.0.0.1", "fp", "ua")
+	code := freshInviteCode(t, svc)
+	tokens, err := svc.Register(context.Background(), username, password, "tok", code, "127.0.0.1", "fp", "ua")
 	if err != nil {
 		t.Fatalf("register %s: %v", username, err)
 	}
@@ -81,12 +83,34 @@ func registerSessionToken(t *testing.T, svc *Service, username, password string)
 	}
 }
 
+func staffSession(t *testing.T, svc *Service) sessionResponse {
+	t.Helper()
+	staffID := ensureStaff(t, svc)
+	tokens, err := svc.createSession(context.Background(), staffID, true, "127.0.0.1", "fp", "ua")
+	if err != nil {
+		t.Fatalf("create staff session: %v", err)
+	}
+	return sessionResponse{
+		AccessToken:  tokens.AccessToken,
+		RefreshToken: tokens.RefreshToken,
+		TokenType:    tokens.TokenType,
+		ExpiresIn:    tokens.ExpiresIn,
+		UserID:       tokens.UserID,
+		PersonaID:    tokens.PersonaID,
+		IsStaff:      true,
+	}
+}
+
+func bearerHeader(s sessionResponse) string {
+	return "Bearer " + s.AccessToken
+}
+
 func TestHandler_Register(t *testing.T) {
 	h, _ := setupHandlerTest(t)
 	server := httptest.NewServer(mountHandler(h))
 	defer server.Close()
 
-	session := registerSession(t, server.URL, "hanna", "password123")
+	session := registerSession(t, h, server.URL, "hanna", "password123")
 	if session.RefreshToken == "" {
 		t.Error("expected refresh token")
 	}
@@ -106,7 +130,7 @@ func TestHandler_Login(t *testing.T) {
 	server := httptest.NewServer(mountHandler(h))
 	defer server.Close()
 
-	registerSession(t, server.URL, "harold", "password123")
+	registerSession(t, h, server.URL, "harold", "password123")
 
 	body, _ := json.Marshal(map[string]any{"username": "harold", "password": "password123"})
 	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/login", bytes.NewReader(body))
@@ -137,7 +161,7 @@ func TestHandler_Login_WrongPassword(t *testing.T) {
 	server := httptest.NewServer(mountHandler(h))
 	defer server.Close()
 
-	registerSession(t, server.URL, "harriet", "password123")
+	registerSession(t, h, server.URL, "harriet", "password123")
 
 	body, _ := json.Marshal(map[string]any{"username": "harriet", "password": "wrongpass"})
 	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/login", bytes.NewReader(body))
@@ -168,9 +192,10 @@ func TestHandler_Register_UsernameTaken(t *testing.T) {
 	server := httptest.NewServer(mountHandler(h))
 	defer server.Close()
 
-	registerSession(t, server.URL, "dave", "password123")
+	registerSession(t, h, server.URL, "dave", "password123")
 
-	body, _ := json.Marshal(map[string]any{"username": "Dave", "password": "password123", "turnstileToken": "tok"})
+	code := freshInviteCode(t, h.service)
+	body, _ := json.Marshal(map[string]any{"username": "Dave", "password": "password123", "turnstileToken": "tok", "inviteCode": code})
 	req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/auth/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", "register-key-dave-2")
@@ -393,7 +418,8 @@ func TestHandler_RateLimited_ReturnsContractCode(t *testing.T) {
 	// before the existing-user check. The first register succeeds, the next
 	// four return ErrUsernameTaken but still consume a username-bucket slot.
 	for i := 0; i < 5; i++ {
-		_, err := h.service.Register(ctx, "ratelimited", "password123", "tok", "127.0.0.1", "fp1", "ua")
+		code := freshInviteCode(t, h.service)
+		_, err := h.service.Register(ctx, "ratelimited", "password123", "tok", code, "127.0.0.1", "fp1", "ua")
 		if i == 0 {
 			if err != nil {
 				t.Fatalf("first register: expected success, got %v", err)
@@ -406,7 +432,8 @@ func TestHandler_RateLimited_ReturnsContractCode(t *testing.T) {
 	}
 
 	var rateLimitErr *RateLimitError
-	if _, err := h.service.Register(ctx, "ratelimited", "password123", "tok", "127.0.0.1", "fp1", "ua"); !errors.As(err, &rateLimitErr) {
+	code := freshInviteCode(t, h.service)
+	if _, err := h.service.Register(ctx, "ratelimited", "password123", "tok", code, "127.0.0.1", "fp1", "ua"); !errors.As(err, &rateLimitErr) {
 		t.Fatalf("expected rate limit error, got %v", err)
 	}
 

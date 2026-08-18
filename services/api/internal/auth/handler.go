@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/yiguan/api/internal/platform/config"
@@ -42,12 +44,16 @@ func (h *Handler) Mount(r chi.Router) {
 
 	r.With(h.AuthMiddleware).Delete("/auth/session", h.DeleteSession)
 	r.With(h.AuthMiddleware).Delete("/me", h.DeleteMe)
+	r.With(h.StaffAuthMiddleware).Post("/invite-codes", h.CreateInviteCode)
+	r.With(h.StaffAuthMiddleware).Get("/invite-codes", h.ListInviteCodes)
+	r.With(h.StaffAuthMiddleware).Delete("/invite-codes/{inviteCodeId}", h.RevokeInviteCode)
 }
 
 type registerRequest struct {
 	Username       string `json:"username"`
 	Password       string `json:"password"`
 	TurnstileToken string `json:"turnstileToken"`
+	InviteCode     string `json:"inviteCode"`
 }
 
 type loginRequest struct {
@@ -86,6 +92,30 @@ type accountDeletionResponse struct {
 	GracePeriodEndsAt string `json:"gracePeriodEndsAt"`
 }
 
+type inviteCodeResponse struct {
+	ID        string  `json:"id"`
+	Code      string  `json:"code"`
+	UsedBy    *string `json:"usedBy"`
+	UsedAt    *string `json:"usedAt"`
+	ExpiresAt *string `json:"expiresAt"`
+	CreatedAt string  `json:"createdAt"`
+}
+
+type inviteCodeCreateRequest struct {
+	ExpiresAt *string `json:"expiresAt"`
+}
+
+type cursorPageResponse struct {
+	Data       []any              `json:"data"`
+	Pagination paginationResponse `json:"pagination"`
+}
+
+type paginationResponse struct {
+	NextCursor *string `json:"nextCursor"`
+	HasMore    bool    `json:"hasMore"`
+	Limit      int     `json:"limit"`
+}
+
 // Register handles POST /v1/auth/register.
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireIdempotencyKey(r, w); !ok {
@@ -101,7 +131,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r, h.cfg.RateLimitBehindProxy)
 	fingerprint := r.Header.Get("X-Device-Fingerprint")
 
-	tokens, err := h.service.Register(r.Context(), req.Username, req.Password, req.TurnstileToken, ip, fingerprint, r.UserAgent())
+	tokens, err := h.service.Register(r.Context(), req.Username, req.Password, req.TurnstileToken, req.InviteCode, ip, fingerprint, r.UserAgent())
 	if err != nil {
 		h.respondDomainError(r.Context(), w, err)
 		return
@@ -261,6 +291,118 @@ func (h *Handler) DeleteMe(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// CreateInviteCode handles POST /v1/invite-codes.
+func (h *Handler) CreateInviteCode(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireIdempotencyKey(r, w); !ok {
+		return
+	}
+
+	var req inviteCodeCreateRequest
+	if err := httpx.ReadJSON(r, &req); err != nil {
+		httpError(r.Context(), w, http.StatusBadRequest, "VALIDATION_FAILED", "invalid request body")
+		return
+	}
+
+	createdBy := UserIDFromContext(r.Context())
+	if createdBy == "" {
+		httpError(r.Context(), w, http.StatusUnauthorized, "UNAUTHORIZED", "missing user")
+		return
+	}
+
+	var expiresAt *time.Time
+	if req.ExpiresAt != nil {
+		parsed, err := time.Parse(time.RFC3339, *req.ExpiresAt)
+		if err != nil {
+			httpError(r.Context(), w, http.StatusBadRequest, "VALIDATION_FAILED", "expiresAt must be RFC3339")
+			return
+		}
+		expiresAt = &parsed
+	}
+
+	inv, err := h.service.CreateInviteCode(r.Context(), createdBy, expiresAt)
+	if err != nil {
+		h.respondDomainError(r.Context(), w, err)
+		return
+	}
+
+	if err := httpx.WriteJSON(w, http.StatusCreated, h.toInviteCodeResponse(inv)); err != nil {
+		httpError(r.Context(), w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to write response")
+	}
+}
+
+// ListInviteCodes handles GET /v1/invite-codes.
+func (h *Handler) ListInviteCodes(w http.ResponseWriter, r *http.Request) {
+	limit := parseInviteLimit(r)
+	codes, nextCursor, hasMore, err := h.service.ListInviteCodes(r.Context(), r.URL.Query().Get("cursor"), limit)
+	if err != nil {
+		h.respondDomainError(r.Context(), w, err)
+		return
+	}
+	data := make([]any, 0, len(codes))
+	for _, c := range codes {
+		data = append(data, h.toInviteCodeResponse(c))
+	}
+	resp := cursorPageResponse{Data: data, Pagination: paginationResponse{NextCursor: nextCursor, HasMore: hasMore, Limit: limit}}
+	if err := httpx.WriteJSON(w, http.StatusOK, resp); err != nil {
+		httpError(r.Context(), w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to write response")
+	}
+}
+
+// RevokeInviteCode handles DELETE /v1/invite-codes/{inviteCodeId}.
+func (h *Handler) RevokeInviteCode(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireIdempotencyKey(r, w); !ok {
+		return
+	}
+	revokedBy := UserIDFromContext(r.Context())
+	err := h.service.RevokeInviteCode(r.Context(), chi.URLParam(r, "inviteCodeId"), revokedBy)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInviteCodeNotFound):
+			httpError(r.Context(), w, http.StatusNotFound, "INVITE.NOT_FOUND", "invite code not found")
+		case errors.Is(err, ErrInviteCodeUsed):
+			httpError(r.Context(), w, http.StatusConflict, "INVITE.ALREADY_USED", "invite code has already been used")
+		default:
+			h.respondDomainError(r.Context(), w, err)
+		}
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) toInviteCodeResponse(inv *InviteCode) inviteCodeResponse {
+	return inviteCodeResponse{
+		ID:        inv.ID,
+		Code:      inv.Code,
+		UsedBy:    inv.UsedBy,
+		UsedAt:    formatOptionalTime(inv.UsedAt),
+		ExpiresAt: formatOptionalTime(inv.ExpiresAt),
+		CreatedAt: inv.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+func formatOptionalTime(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	v := t.Format(time.RFC3339)
+	return &v
+}
+
+func parseInviteLimit(r *http.Request) int {
+	q := r.URL.Query().Get("limit")
+	if q == "" {
+		return 20
+	}
+	n, err := strconv.Atoi(q)
+	if err != nil || n < 1 {
+		return 20
+	}
+	if n > 100 {
+		return 100
+	}
+	return n
+}
+
 // AuthMiddleware validates the bearer access token and injects the user and
 // session identifiers into the request context.
 func (h *Handler) AuthMiddleware(next http.Handler) http.Handler {
@@ -403,6 +545,14 @@ func (h *Handler) respondDomainError(ctx context.Context, w http.ResponseWriter,
 		httpError(ctx, w, http.StatusUnauthorized, "AUTH.INVALID_CREDENTIALS", "invalid username or password")
 	case errors.Is(err, ErrCaptchaFailed):
 		httpError(ctx, w, http.StatusBadRequest, "AUTH.CAPTCHA_FAILED", "human verification failed, please try again")
+	case errors.Is(err, ErrInviteCodeInvalid):
+		httpError(ctx, w, http.StatusBadRequest, "INVITE.CODE_INVALID", "invite code is invalid")
+	case errors.Is(err, ErrInviteCodeUsed):
+		httpError(ctx, w, http.StatusBadRequest, "INVITE.CODE_USED", "invite code has already been used")
+	case errors.Is(err, ErrInviteCodeExpired):
+		httpError(ctx, w, http.StatusBadRequest, "INVITE.CODE_EXPIRED", "invite code has expired")
+	case errors.Is(err, ErrInviteCodeNotFound):
+		httpError(ctx, w, http.StatusNotFound, "INVITE.NOT_FOUND", "invite code not found")
 	default:
 		httpError(ctx, w, http.StatusInternalServerError, "INTERNAL_ERROR", "something went wrong. please try again")
 	}
