@@ -2,11 +2,13 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -53,6 +55,17 @@ type Session struct {
 	Fingerprint      string
 }
 
+// InviteCode is a single-use registration invite.
+type InviteCode struct {
+	ID        string
+	Code      string
+	CreatedBy string
+	UsedBy    *string
+	UsedAt    *time.Time
+	ExpiresAt *time.Time
+	CreatedAt time.Time
+}
+
 // AuditEvent records security-relevant occurrences.
 type AuditEvent struct {
 	ID          string
@@ -87,6 +100,13 @@ type Repository interface {
 	UpdateSessionLastUsed(ctx context.Context, id string) error
 
 	CreateAuditEvent(ctx context.Context, event *AuditEvent) error
+
+	CreateInviteCode(ctx context.Context, code *InviteCode) error
+	GetInviteCode(ctx context.Context, code string) (*InviteCode, error)
+	GetInviteCodeByID(ctx context.Context, id string) (*InviteCode, error)
+	ListInviteCodes(ctx context.Context, cursor *time.Time, limit int) ([]*InviteCode, *time.Time, error)
+	DeleteInviteCode(ctx context.Context, id string) error
+	CreateUserAndConsumeInviteCode(ctx context.Context, username, passwordHash, inviteCode string) (*User, error)
 }
 
 // PostgresRepository implements Repository using PostgreSQL.
@@ -411,4 +431,159 @@ func (r *PostgresRepository) CreateAuditEvent(ctx context.Context, event *AuditE
 		return fmt.Errorf("insert audit event: %w", err)
 	}
 	return nil
+}
+
+const inviteCodeColumns = `id, code, created_by, used_by, used_at, expires_at, created_at`
+
+func scanInviteCode(row pgx.Row) (*InviteCode, error) {
+	var c InviteCode
+	if err := row.Scan(
+		&c.ID,
+		&c.Code,
+		&c.CreatedBy,
+		&c.UsedBy,
+		&c.UsedAt,
+		&c.ExpiresAt,
+		&c.CreatedAt,
+	); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (r *PostgresRepository) CreateInviteCode(ctx context.Context, code *InviteCode) error {
+	const sql = `
+		INSERT INTO invite_codes (code, created_by, expires_at)
+		VALUES ($1, $2, $3)
+		RETURNING id, created_at
+	`
+	row := r.pool.QueryRow(ctx, sql, code.Code, code.CreatedBy, code.ExpiresAt)
+	if err := row.Scan(&code.ID, &code.CreatedAt); err != nil {
+		return fmt.Errorf("insert invite code: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresRepository) GetInviteCode(ctx context.Context, code string) (*InviteCode, error) {
+	const sql = `
+		SELECT ` + inviteCodeColumns + `
+		FROM invite_codes
+		WHERE code = $1
+	`
+	c, err := scanInviteCode(r.pool.QueryRow(ctx, sql, code))
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select invite code: %w", err)
+	}
+	return c, nil
+}
+
+func (r *PostgresRepository) GetInviteCodeByID(ctx context.Context, id string) (*InviteCode, error) {
+	const sql = `
+		SELECT ` + inviteCodeColumns + `
+		FROM invite_codes
+		WHERE id = $1
+	`
+	c, err := scanInviteCode(r.pool.QueryRow(ctx, sql, id))
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select invite code by id: %w", err)
+	}
+	return c, nil
+}
+
+func (r *PostgresRepository) ListInviteCodes(ctx context.Context, cursor *time.Time, limit int) ([]*InviteCode, *time.Time, error) {
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	const sql = `
+		SELECT ` + inviteCodeColumns + `
+		FROM invite_codes
+		WHERE ($1::timestamptz IS NULL OR created_at < $1)
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2
+	`
+	rows, err := r.pool.Query(ctx, sql, cursor, limit+1)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list invite codes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*InviteCode
+	for rows.Next() {
+		c, err := scanInviteCode(rows)
+		if err != nil {
+			return nil, nil, err
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate invite codes: %w", err)
+	}
+
+	var next *time.Time
+	if len(out) > limit {
+		last := out[limit-1]
+		t := last.CreatedAt
+		next = &t
+		out = out[:limit]
+	}
+	return out, next, nil
+}
+
+func (r *PostgresRepository) DeleteInviteCode(ctx context.Context, id string) error {
+	const sql = `DELETE FROM invite_codes WHERE id = $1`
+	if _, err := r.pool.Exec(ctx, sql, id); err != nil {
+		return fmt.Errorf("delete invite code: %w", err)
+	}
+	return nil
+}
+
+// CreateUserAndConsumeInviteCode inserts the user and marks the invite code used
+// in a single transaction. A concurrent registration with the same code loses
+// the UPDATE and causes the whole transaction (user insert included) to roll back.
+func (r *PostgresRepository) CreateUserAndConsumeInviteCode(ctx context.Context, username, passwordHash, inviteCode string) (*User, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	const insertUser = `
+		INSERT INTO users (username, password_hash)
+		VALUES ($1, $2)
+		RETURNING ` + userColumns
+	u, err := scanUser(tx.QueryRow(ctx, insertUser, username, passwordHash))
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return nil, ErrUsernameTaken
+		}
+		return nil, fmt.Errorf("insert user: %w", err)
+	}
+
+	const consumeInvite = `
+		UPDATE invite_codes
+		SET used_by = $2, used_at = now()
+		WHERE code = $1 AND used_by IS NULL AND (expires_at IS NULL OR expires_at > now())
+	`
+	tag, err := tx.Exec(ctx, consumeInvite, inviteCode, u.ID)
+	if err != nil {
+		return nil, fmt.Errorf("consume invite code: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrInviteCodeUsed
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	return u, nil
 }

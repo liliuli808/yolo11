@@ -37,6 +37,10 @@ var (
 	ErrCaptchaFailed           = errors.New("captcha verification failed")
 	ErrInvalidUsername         = errors.New("invalid username")
 	ErrInvalidPassword         = errors.New("invalid password")
+	ErrInviteCodeInvalid       = errors.New("invalid invite code")
+	ErrInviteCodeUsed          = errors.New("invite code already used")
+	ErrInviteCodeExpired       = errors.New("invite code expired")
+	ErrInviteCodeNotFound      = errors.New("invite code not found")
 )
 
 // dummyPasswordHash is a precomputed bcrypt hash used in the nil-user Login
