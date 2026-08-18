@@ -249,7 +249,7 @@ func (s *Service) ListInviteCodes(ctx context.Context, cursor string, limit int)
 }
 
 // RevokeInviteCode deletes an unused invite code.
-func (s *Service) RevokeInviteCode(ctx context.Context, id string) error {
+func (s *Service) RevokeInviteCode(ctx context.Context, id, revokedBy string) error {
 	inv, err := s.repo.GetInviteCodeByID(ctx, id)
 	if err != nil {
 		return fmt.Errorf("lookup invite code by id: %w", err)
@@ -263,7 +263,7 @@ func (s *Service) RevokeInviteCode(ctx context.Context, id string) error {
 	if err := s.repo.DeleteInviteCode(ctx, id); err != nil {
 		return err
 	}
-	s.audit(ctx, &inv.CreatedBy, nil, "invite.code_revoked", "", "", "", nil)
+	s.audit(ctx, &revokedBy, nil, "invite.code_revoked", "", "", "", nil)
 	return nil
 }
 
