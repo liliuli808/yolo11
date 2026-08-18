@@ -30,8 +30,17 @@ class AuthViewModel @Inject constructor(
     private val _uiState = MutableStateFlow<AuthUiState>(AuthUiState.Idle)
     val uiState: StateFlow<AuthUiState> = _uiState
 
-    fun register(username: String, password: String, turnstileToken: String, onSuccess: () -> Unit) {
-        submit({ apiClient.register(RegisterRequest(username, password, turnstileToken)) }, onSuccess)
+    fun register(
+        username: String,
+        password: String,
+        turnstileToken: String,
+        inviteCode: String,
+        onSuccess: () -> Unit
+    ) {
+        submit(
+            { apiClient.register(RegisterRequest(username, password, turnstileToken, inviteCode)) },
+            onSuccess
+        )
     }
 
     fun login(username: String, password: String, turnstileToken: String, onSuccess: () -> Unit) {

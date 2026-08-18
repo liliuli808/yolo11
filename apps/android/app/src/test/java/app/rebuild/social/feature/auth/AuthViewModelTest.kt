@@ -80,12 +80,12 @@ class AuthViewModelTest {
     }
 
     @Test
-    fun `register sends register request with turnstile token`() = runTest(dispatcher) {
+    fun `register sends register request with turnstile token and invite code`() = runTest(dispatcher) {
         val api = FakeApiClient(Result.success(sampleSession))
         val store = FakeSessionStore()
         val viewModel = AuthViewModel(api, store)
 
-        viewModel.register("alice", "password123", "token", {})
+        viewModel.register("alice", "password123", "token", "LANTERN-ABCD", {})
         advanceUntilIdle()
 
         assertEquals(1, api.registerCalls)
@@ -93,6 +93,7 @@ class AuthViewModelTest {
         assertEquals("alice", request.username)
         assertEquals("password123", request.password)
         assertEquals("token", request.turnstileToken)
+        assertEquals("LANTERN-ABCD", request.inviteCode)
     }
 
     @Test

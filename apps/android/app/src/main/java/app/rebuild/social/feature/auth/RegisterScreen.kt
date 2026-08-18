@@ -56,6 +56,7 @@ fun RegisterScreen(
     var agreed by remember { mutableStateOf(false) }
     var turnstileEpoch by remember { mutableStateOf(0) }
     var turnstileToken by remember { mutableStateOf<String?>(null) }
+    var inviteCode by remember { mutableStateOf("") }
     val uiState by viewModel.uiState.collectAsState()
 
     LaunchedEffect(uiState) {
@@ -135,6 +136,19 @@ fun RegisterScreen(
                 )
             }
             Spacer(modifier = Modifier.height(LanternSpacing.space4))
+            LanternInput(
+                value = inviteCode,
+                onValueChange = {
+                    inviteCode = it
+                    if (uiState is AuthUiState.Error) viewModel.clearError()
+                },
+                label = "邀请码",
+                placeholder = "请输入邀请码",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("register-invite")
+            )
+            Spacer(modifier = Modifier.height(LanternSpacing.space4))
             key(turnstileEpoch) {
                 TurnstileWebView(
                     siteKey = BuildConfig.TURNSTILE_SITE_KEY,
@@ -157,13 +171,13 @@ fun RegisterScreen(
                 onClick = {
                     val token = turnstileToken
                     if (token != null && password == confirm) {
-                        viewModel.register(username, password, token, onRegistered)
+                        viewModel.register(username, password, token, inviteCode, onRegistered)
                     }
                 },
                 variant = ButtonVariant.FilledPrimary,
                 modifier = Modifier.fillMaxWidth(),
                 enabled = username.isNotBlank() && password.length >= 8 && password == confirm &&
-                    agreed && turnstileToken != null && uiState != AuthUiState.Loading
+                    agreed && inviteCode.isNotBlank() && turnstileToken != null && uiState != AuthUiState.Loading
             )
             Spacer(modifier = Modifier.height(LanternSpacing.space4))
             Text(

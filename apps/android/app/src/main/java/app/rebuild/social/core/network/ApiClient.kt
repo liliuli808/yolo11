@@ -19,7 +19,8 @@ interface ApiClient {
 data class RegisterRequest(
     @SerialName("username") val username: String,
     @SerialName("password") val password: String,
-    @SerialName("turnstileToken") val turnstileToken: String
+    @SerialName("turnstileToken") val turnstileToken: String,
+    @SerialName("inviteCode") val inviteCode: String
 )
 
 @kotlinx.serialization.Serializable
