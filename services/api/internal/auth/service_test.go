@@ -83,7 +83,7 @@ func cleanTables(t *testing.T) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := testDB.Exec(ctx, "TRUNCATE TABLE audit_events, sessions, email_codes, users RESTART IDENTITY CASCADE"); err != nil {
+	if _, err := testDB.Exec(ctx, "TRUNCATE TABLE audit_events, sessions, email_codes, users, invite_codes RESTART IDENTITY CASCADE"); err != nil {
 		t.Fatalf("clean tables: %v", err)
 	}
 }
@@ -128,12 +128,45 @@ func newTestService() (*Service, *recordingMailer) {
 	return NewService(newTestConfig(), repo, mailer, limiter, &StubTurnstile{}), mailer
 }
 
+// ensureStaff creates the test admin via the repository (bypassing the invite
+// requirement) and returns its id. Username "admin" is staff in newTestConfig.
+func ensureStaff(t *testing.T, svc *Service) string {
+	t.Helper()
+	ctx := context.Background()
+	if u, err := svc.repo.GetUserByUsername(ctx, "admin"); err != nil {
+		t.Fatalf("lookup admin: %v", err)
+	} else if u != nil {
+		return u.ID
+	}
+	sum := sha512.Sum384([]byte("password123"))
+	hash, err := bcrypt.GenerateFromPassword(sum[:], bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatalf("hash admin password: %v", err)
+	}
+	u, err := svc.repo.CreateUser(ctx, "admin", string(hash))
+	if err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	return u.ID
+}
+
+func freshInviteCode(t *testing.T, svc *Service) string {
+	t.Helper()
+	staffID := ensureStaff(t, svc)
+	inv, err := svc.CreateInviteCode(context.Background(), staffID, nil)
+	if err != nil {
+		t.Fatalf("create invite code: %v", err)
+	}
+	return inv.Code
+}
+
 func TestRegister_Success(t *testing.T) {
 	cleanTables(t)
 	svc, _ := newTestService()
 	ctx := context.Background()
 
-	tokens, err := svc.Register(ctx, "Alice_1", "password123", "tok", "127.0.0.1", "fp", "ua")
+	code := freshInviteCode(t, svc)
+	tokens, err := svc.Register(ctx, "Alice_1", "password123", "tok", code, "127.0.0.1", "fp", "ua")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -162,10 +195,12 @@ func TestRegister_UsernameTaken(t *testing.T) {
 	svc, _ := newTestService()
 	ctx := context.Background()
 
-	if _, err := svc.Register(ctx, "bob", "password123", "tok", "127.0.0.1", "fp1", "ua"); err != nil {
+	code := freshInviteCode(t, svc)
+	if _, err := svc.Register(ctx, "bob", "password123", "tok", code, "127.0.0.1", "fp1", "ua"); err != nil {
 		t.Fatalf("first register: %v", err)
 	}
-	if _, err := svc.Register(ctx, "Bob", "password123", "tok", "127.0.0.1", "fp2", "ua"); !errors.Is(err, ErrUsernameTaken) {
+	code2 := freshInviteCode(t, svc)
+	if _, err := svc.Register(ctx, "Bob", "password123", "tok", code2, "127.0.0.1", "fp2", "ua"); !errors.Is(err, ErrUsernameTaken) {
 		t.Fatalf("expected ErrUsernameTaken, got %v", err)
 	}
 }
@@ -178,7 +213,7 @@ func TestRegister_CaptchaFails(t *testing.T) {
 	svc := NewService(cfg, repo, nil, limiter, &StubTurnstile{Fail: true})
 	ctx := context.Background()
 
-	if _, err := svc.Register(ctx, "carol", "password123", "tok", "127.0.0.1", "fp", "ua"); !errors.Is(err, ErrCaptchaFailed) {
+	if _, err := svc.Register(ctx, "carol", "password123", "tok", "", "127.0.0.1", "fp", "ua"); !errors.Is(err, ErrCaptchaFailed) {
 		t.Fatalf("expected ErrCaptchaFailed, got %v", err)
 	}
 }
@@ -188,7 +223,8 @@ func TestLogin_Success(t *testing.T) {
 	svc, _ := newTestService()
 	ctx := context.Background()
 
-	if _, err := svc.Register(ctx, "dave", "password123", "tok", "127.0.0.1", "fp", "ua"); err != nil {
+	code := freshInviteCode(t, svc)
+	if _, err := svc.Register(ctx, "dave", "password123", "tok", code, "127.0.0.1", "fp", "ua"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	tokens, err := svc.Login(ctx, "dave", "password123", "tok", "127.0.0.1", "fp", "ua")
@@ -205,7 +241,8 @@ func TestLogin_WrongPassword(t *testing.T) {
 	svc, _ := newTestService()
 	ctx := context.Background()
 
-	if _, err := svc.Register(ctx, "erin", "password123", "tok", "127.0.0.1", "fp", "ua"); err != nil {
+	code := freshInviteCode(t, svc)
+	if _, err := svc.Register(ctx, "erin", "password123", "tok", code, "127.0.0.1", "fp", "ua"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	if _, err := svc.Login(ctx, "erin", "wrongpass", "tok", "127.0.0.1", "fp", "ua"); !errors.Is(err, ErrInvalidCredentials) {
@@ -228,7 +265,8 @@ func TestVerifyPasswordForDeletion(t *testing.T) {
 	svc, _ := newTestService()
 	ctx := context.Background()
 
-	tokens, err := svc.Register(ctx, "frank", "password123", "tok", "127.0.0.1", "fp", "ua")
+	code := freshInviteCode(t, svc)
+	tokens, err := svc.Register(ctx, "frank", "password123", "tok", code, "127.0.0.1", "fp", "ua")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -245,7 +283,8 @@ func TestRefreshSession_RotatesToken(t *testing.T) {
 	svc, _ := newTestService()
 	ctx := context.Background()
 
-	tokens, err := svc.Register(ctx, "rotate", "password123", "tok", "127.0.0.1", "fp1", "ua")
+	code := freshInviteCode(t, svc)
+	tokens, err := svc.Register(ctx, "rotate", "password123", "tok", code, "127.0.0.1", "fp1", "ua")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -272,7 +311,8 @@ func TestRefreshSession_RevokedSessionRejected(t *testing.T) {
 	svc, _ := newTestService()
 	ctx := context.Background()
 
-	tokens, err := svc.Register(ctx, "revoked", "password123", "tok", "127.0.0.1", "fp1", "ua")
+	code := freshInviteCode(t, svc)
+	tokens, err := svc.Register(ctx, "revoked", "password123", "tok", code, "127.0.0.1", "fp1", "ua")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -298,7 +338,8 @@ func TestRequestAccountDeletion_RevokesAllSessions(t *testing.T) {
 	svc, _ := newTestService()
 	ctx := context.Background()
 
-	tokens, err := svc.Register(ctx, "delete", "password123", "tok", "127.0.0.1", "fp1", "ua")
+	code := freshInviteCode(t, svc)
+	tokens, err := svc.Register(ctx, "delete", "password123", "tok", code, "127.0.0.1", "fp1", "ua")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -326,7 +367,8 @@ func TestRequestAccountDeletion_AlreadyPending(t *testing.T) {
 	svc, _ := newTestService()
 	ctx := context.Background()
 
-	tokens, err := svc.Register(ctx, "delete2", "password123", "tok", "127.0.0.1", "fp1", "ua")
+	code := freshInviteCode(t, svc)
+	tokens, err := svc.Register(ctx, "delete2", "password123", "tok", code, "127.0.0.1", "fp1", "ua")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -345,7 +387,8 @@ func TestPurgeDeletedAccounts_PurgesPastGracePeriod(t *testing.T) {
 	svc, _ := newTestService()
 	ctx := context.Background()
 
-	tokens, err := svc.Register(ctx, "purge", "password123", "tok", "127.0.0.1", "fp1", "ua")
+	code := freshInviteCode(t, svc)
+	tokens, err := svc.Register(ctx, "purge", "password123", "tok", code, "127.0.0.1", "fp1", "ua")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}

@@ -155,7 +155,7 @@ var (
 )
 
 // Register creates a user with username/password and a session.
-func (s *Service) Register(ctx context.Context, username, password, turnstileToken, ip, fingerprint, userAgent string) (*TokenResponse, error) {
+func (s *Service) Register(ctx context.Context, username, password, turnstileToken, inviteCode, ip, fingerprint, userAgent string) (*TokenResponse, error) {
 	if err := s.verifyTurnstile(ctx, turnstileToken); err != nil {
 		return nil, err
 	}
@@ -177,6 +177,11 @@ func (s *Service) Register(ctx context.Context, username, password, turnstileTok
 		return nil, &RateLimitError{RetryAfter: retryAfter}
 	}
 
+	inviteCode = NormalizeInviteCode(inviteCode)
+	if _, err := s.verifyInviteCode(ctx, inviteCode); err != nil {
+		return nil, err
+	}
+
 	existing, err := s.repo.GetUserByUsername(ctx, normalized)
 	if err != nil {
 		return nil, fmt.Errorf("check username: %w", err)
@@ -191,9 +196,9 @@ func (s *Service) Register(ctx context.Context, username, password, turnstileTok
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
 
-	user, err := s.repo.CreateUser(ctx, normalized, string(hash))
+	user, err := s.repo.CreateUserAndConsumeInviteCode(ctx, normalized, string(hash), inviteCode)
 	if err != nil {
-		return nil, fmt.Errorf("create user: %w", err)
+		return nil, err
 	}
 
 	tokens, err := s.createSession(ctx, user.ID, s.isStaff(user.Username), ip, fingerprint, userAgent)
@@ -203,6 +208,78 @@ func (s *Service) Register(ctx context.Context, username, password, turnstileTok
 
 	s.audit(ctx, &user.ID, &tokens.SessionID, "account.registered", ip, userAgent, fingerprint, nil)
 	return tokens, nil
+}
+
+// CreateInviteCode generates and stores a single-use invite code.
+func (s *Service) CreateInviteCode(ctx context.Context, createdBy string, expiresAt *time.Time) (*InviteCode, error) {
+	code, err := generateInviteCode()
+	if err != nil {
+		return nil, err
+	}
+	inv := &InviteCode{Code: code, CreatedBy: createdBy, ExpiresAt: expiresAt}
+	if err := s.repo.CreateInviteCode(ctx, inv); err != nil {
+		return nil, err
+	}
+	s.audit(ctx, &createdBy, nil, "invite.code_created", "", "", "", nil)
+	return inv, nil
+}
+
+// ListInviteCodes returns invite codes newest-first with time-based cursor pagination.
+func (s *Service) ListInviteCodes(ctx context.Context, cursor string, limit int) ([]*InviteCode, *string, bool, error) {
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	cur, err := parseInviteCursor(cursor)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	codes, next, err := s.repo.ListInviteCodes(ctx, cur, limit)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	var nextCursor *string
+	if next != nil {
+		encoded := encodeInviteCursor(*next)
+		nextCursor = &encoded
+	}
+	return codes, nextCursor, next != nil, nil
+}
+
+// RevokeInviteCode deletes an unused invite code.
+func (s *Service) RevokeInviteCode(ctx context.Context, id string) error {
+	inv, err := s.repo.GetInviteCodeByID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("lookup invite code by id: %w", err)
+	}
+	if inv == nil {
+		return ErrInviteCodeNotFound
+	}
+	if inv.UsedAt != nil {
+		return ErrInviteCodeUsed
+	}
+	if err := s.repo.DeleteInviteCode(ctx, id); err != nil {
+		return err
+	}
+	s.audit(ctx, &inv.CreatedBy, nil, "invite.code_revoked", "", "", "", nil)
+	return nil
+}
+
+func parseInviteCursor(s string) (*time.Time, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cursor")
+	}
+	return &t, nil
+}
+
+func encodeInviteCursor(t time.Time) string {
+	return t.Format(time.RFC3339Nano)
 }
 
 // Login validates credentials and creates a session.
@@ -544,6 +621,57 @@ func validatePassword(password string) error {
 		return ErrInvalidPassword
 	}
 	return nil
+}
+
+const inviteAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+// NormalizeInviteCode uppercases and trims an invite code for matching.
+func NormalizeInviteCode(code string) string {
+	return strings.ToUpper(strings.TrimSpace(code))
+}
+
+// generateInviteCode returns a code like LANTERN-ABCD-EFGH-JKMP-QRWX.
+// 16 characters from a 32-char alphabet (unambiguous, no I/L/O/U) = 80 bits of
+// entropy; the LANTERN- prefix is decorative grouping only.
+func generateInviteCode() (string, error) {
+	const groups = 4
+	const groupLen = 4
+	b := make([]byte, groups*groupLen)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate invite code: %w", err)
+	}
+	var sb strings.Builder
+	sb.WriteString("LANTERN-")
+	for i, v := range b {
+		if i > 0 && i%groupLen == 0 {
+			sb.WriteByte('-')
+		}
+		sb.WriteByte(inviteAlphabet[int(v)%len(inviteAlphabet)])
+	}
+	return sb.String(), nil
+}
+
+// verifyInviteCode classifies a submitted code (invalid / used / expired). It is
+// read-only; consumption happens atomically with user creation.
+func (s *Service) verifyInviteCode(ctx context.Context, code string) (*InviteCode, error) {
+	normalized := NormalizeInviteCode(code)
+	if normalized == "" {
+		return nil, ErrInviteCodeInvalid
+	}
+	inv, err := s.repo.GetInviteCode(ctx, normalized)
+	if err != nil {
+		return nil, fmt.Errorf("lookup invite code: %w", err)
+	}
+	if inv == nil {
+		return nil, ErrInviteCodeInvalid
+	}
+	if inv.UsedAt != nil {
+		return nil, ErrInviteCodeUsed
+	}
+	if inv.ExpiresAt != nil && inv.ExpiresAt.Before(time.Now().UTC()) {
+		return nil, ErrInviteCodeExpired
+	}
+	return inv, nil
 }
 
 func (s *Service) isStaff(username string) bool {
