@@ -2,6 +2,7 @@ package identity
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -38,7 +39,8 @@ func mountIdentityHandler(h *Handler, authHandler *auth.Handler) http.Handler {
 
 func createSession(t *testing.T, serverURL string, username, password string) string {
 	t.Helper()
-	body, _ := json.Marshal(map[string]any{"username": username, "password": password, "turnstileToken": "tok"})
+	inviteCode := freshInviteCode(t)
+	body, _ := json.Marshal(map[string]any{"username": username, "password": password, "turnstileToken": "tok", "inviteCode": inviteCode})
 	req, _ := http.NewRequest(http.MethodPost, serverURL+"/v1/auth/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", "register-"+username)
@@ -60,6 +62,28 @@ func createSession(t *testing.T, serverURL string, username, password string) st
 		t.Fatal("missing access token")
 	}
 	return token
+}
+
+func freshInviteCode(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	repo := auth.NewPostgresRepository(testDB)
+	issuer, err := repo.GetUserByUsername(ctx, "inviteissuer")
+	if err != nil {
+		t.Fatalf("lookup invite issuer: %v", err)
+	}
+	if issuer == nil {
+		issuer, err = repo.CreateUser(ctx, "inviteissuer", "unused-test-hash")
+		if err != nil {
+			t.Fatalf("create invite issuer: %v", err)
+		}
+	}
+	svc := auth.NewService(newTestConfig(), repo, &recordingMailer{}, auth.NewMemoryLimiter(), &auth.StubTurnstile{})
+	invite, err := svc.CreateInviteCode(ctx, issuer.ID, nil)
+	if err != nil {
+		t.Fatalf("create invite code: %v", err)
+	}
+	return invite.Code
 }
 
 func TestHandler_GetMe(t *testing.T) {
